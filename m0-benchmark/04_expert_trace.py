@@ -60,14 +60,14 @@ def main() -> int:
         "-c", str(args.ctx_size),
         "-t", str(args.threads),
         "-ngl", args.gpu_layers,
-        "--edge-moe-trace", str(trace),
+        "--moe-trace", str(trace),
     ]
     if args.prompt is not None:
         command.extend(["-p", args.prompt])
     else:
         command.extend(["-f", args.prompt_file])
     if args.max_events:
-        command.extend(["--edge-moe-trace-max-events", str(args.max_events)])
+        command.extend(["--moe-trace-max-events", str(args.max_events)])
     if not args.warmup:
         command.append("--no-warmup")
 

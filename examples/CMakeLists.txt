@@ -19,6 +19,8 @@ else()
     add_subdirectory(embedding)
     add_subdirectory(eval-callback)
 
+    add_subdirectory(edge-moe-layout)
+
     add_subdirectory(gguf-hash)
     add_subdirectory(gguf)
     add_subdirectory(idle)

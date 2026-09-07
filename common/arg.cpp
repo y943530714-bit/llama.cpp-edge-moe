@@ -4572,14 +4572,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_DEBUG}));
     add_opt(common_arg(
-        {"--edge-moe-trace", "--dump-expert-trace"}, "FILE",
+        {"--moe-trace", "--edge-moe-trace", "--dump-expert-trace"}, "FILE",
         "write MoE expert IDs and routing weights to a JSONL trace (default: disabled)",
         [](common_params & params, const std::string & value) {
             params.edge_moe_trace_path = value;
         }
     ));
     add_opt(common_arg(
-        {"--edge-moe-trace-max-events"}, "N",
+        {"--moe-trace-max-events", "--edge-moe-trace-max-events"}, "N",
         "limit the number of MoE route events written to the trace (default: unlimited)",
         [](common_params & params, int value) {
             if (value < 0) {

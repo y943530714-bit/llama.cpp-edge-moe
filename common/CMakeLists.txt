@@ -73,6 +73,8 @@ add_library(${TARGET}
     debug.h
     download.cpp
     download.h
+    edge_moe_layout.cpp
+    edge_moe_layout.h
     edge_moe_trace.cpp
     edge_moe_trace.h
     fit.cpp

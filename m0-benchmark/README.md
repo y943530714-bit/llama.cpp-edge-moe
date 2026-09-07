@@ -10,6 +10,8 @@ These scripts collect the first measurements needed by the edge MoE plan:
 
 Build `llama-cli` first. From the repository root:
 
+For the complete M0/PR-2 procedure, see [`docs/edge-moe-m0-runbook.md`](../docs/edge-moe-m0-runbook.md).
+
 ```bash
 cmake -B build -DGGML_METAL=ON -DLLAMA_CURL=OFF
 cmake --build build --config Release -j
@@ -95,3 +97,38 @@ expert IDs and weights in token-major order:
 `decode`, otherwise it is marked as `prefill`. Raw weights are retained when a
 model does not expose a normalized routing tensor; the record then sets
 `weights_normalized` to `false`.
+
+## Expert range validation (PR-2)
+
+`llama-edge-moe-layout` reads GGUF tensor metadata and checks that routed
+expert weights are contiguous along dimension 2. It reports the absolute file
+offset and byte size for each expert slice without loading the full model:
+
+```bash
+./build/bin/llama-edge-moe-layout \
+  --model /path/to/model.gguf \
+  --expert 0
+```
+
+Read and validate one slice for every matched expert tensor. This checks file
+bounds and `ggml_validate_row_data` in addition to the metadata calculation:
+
+```bash
+./build/bin/llama-edge-moe-layout \
+  --model /path/to/model.gguf \
+  --expert 0 \
+  --verify
+```
+
+For a split model, repeat `--split` for the remaining GGUF shards. Use
+`--all-experts --verify` only when an exhaustive read is intended. The tool's
+`--self-test` exercises the logical-to-file slice mapping on an in-memory
+fixture and does not need a model:
+
+```bash
+./build/bin/llama-edge-moe-layout --self-test
+```
+
+This PR validates the range layout and raw slice readability. It does not yet
+enable expert streaming, resident slots, asynchronous I/O, cache eviction, or
+split-graph execution.
