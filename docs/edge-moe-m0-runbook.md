@@ -1,6 +1,6 @@
 # EdgeMoE-Llama M0 / PR-3 运行手册
 
-本文对应 `edge_moe_design_v1.1.md` 的 M0 和 PR-2。当前代码只做测量、路由观测和 expert range 验证，不会改变默认 llama.cpp 推理路径。
+本文对应 `edge_moe_design_v1.1.md` 的 M0–PR-3。当前代码只做测量、路由观测和 expert range 验证，不会改变默认 llama.cpp 推理路径。
 
 ## 1. 当前交付范围
 
@@ -44,7 +44,7 @@ M4/Metal：
 
 ```bash
 cmake -B build -DGGML_METAL=ON -DLLAMA_CURL=OFF
-cmake --build build --config Release -j --target llama-cli llama-edge-moe-layout
+cmake --build build --config Release -j --target llama-cli llama-edge-moe-layout llama-edge-moe-slot-probe
 ```
 
 CPU-only：
