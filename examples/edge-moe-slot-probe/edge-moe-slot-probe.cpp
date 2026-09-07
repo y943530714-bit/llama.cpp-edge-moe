@@ -29,6 +29,32 @@ struct options {
     bool show_help = false;
 };
 
+struct model_layout {
+    std::string path;
+    edge_moe_expert_layout layout;
+};
+
+bool select_gate_up_parts(
+        const bool has_gate_up,
+        const bool has_gate,
+        const bool has_up,
+        std::vector<edge_moe_tensor_part> & selected,
+        std::string & error) {
+    selected.clear();
+    error.clear();
+    if (has_gate_up) {
+        selected.push_back(edge_moe_tensor_part::gate_up);
+        return true;
+    }
+    if (has_gate && has_up) {
+        selected.push_back(edge_moe_tensor_part::gate);
+        selected.push_back(edge_moe_tensor_part::up);
+        return true;
+    }
+    error = "no fused gate_up tensor and the split gate/up tensor pair is incomplete";
+    return false;
+}
+
 bool parse_u64(const char * text, uint64_t & value) {
     if (text == nullptr || *text == '\0') {
         return false;
@@ -188,6 +214,19 @@ bool run_backend_self_test() {
     constexpr uint32_t resident_slot_count = 2;
     constexpr size_t expert_elements = 8 * 4;
     const size_t expert_bytes = expert_elements * sizeof(float);
+
+    std::vector<edge_moe_tensor_part> selected_parts;
+    std::string selection_error;
+    if (!select_gate_up_parts(true, true, true, selected_parts, selection_error) ||
+        selected_parts.size() != 1 || selected_parts[0] != edge_moe_tensor_part::gate_up ||
+        !select_gate_up_parts(false, true, true, selected_parts, selection_error) ||
+        selected_parts.size() != 2 || selected_parts[0] != edge_moe_tensor_part::gate ||
+        selected_parts[1] != edge_moe_tensor_part::up ||
+        select_gate_up_parts(false, true, false, selected_parts, selection_error)) {
+        std::fprintf(stderr, "self-test: fused/split gate_up selection failed\n");
+        return false;
+    }
+    std::printf("tensor part selection: fused/split gate_up=ok\n");
 
     edge_moe_resident_slots slots(logical_expert_count, resident_slot_count, expert_bytes);
     std::vector<float> weights(logical_expert_count * expert_elements);
@@ -351,11 +390,9 @@ bool run_backend_self_test() {
 }
 
 bool run_model_probe(const options & params) {
-    bool found = false;
-    std::string model_path;
-    edge_moe_expert_layout layout;
+    std::vector<model_layout> candidates;
 
-    for (uint32_t file_idx = 0; file_idx < params.files.size() && !found; ++file_idx) {
+    for (uint32_t file_idx = 0; file_idx < params.files.size(); ++file_idx) {
         const std::string & path = params.files[file_idx];
         std::error_code ec;
         const uintmax_t file_size_u = std::filesystem::file_size(path, ec);
@@ -380,11 +417,22 @@ bool run_model_probe(const options & params) {
                 continue;
             }
             const std::string name(tensor_name);
-            if (edge_moe_tensor_part_from_name(name) != params.part) {
+            const edge_moe_tensor_part actual_part = edge_moe_tensor_part_from_name(name);
+            const bool matches_part = params.part == edge_moe_tensor_part::gate_up
+                ? actual_part == edge_moe_tensor_part::gate_up ||
+                    actual_part == edge_moe_tensor_part::gate ||
+                    actual_part == edge_moe_tensor_part::up
+                : actual_part == params.part;
+            if (!matches_part) {
                 continue;
             }
             int layer = -1;
             if (!edge_moe_parse_layer(name, layer) || layer != static_cast<int>(params.layer)) {
+                continue;
+            }
+            if (std::any_of(candidates.begin(), candidates.end(), [actual_part](const model_layout & candidate) {
+                    return candidate.layout.part == actual_part;
+                })) {
                 continue;
             }
 
@@ -406,21 +454,58 @@ bool run_model_probe(const options & params) {
             }
             std::copy(ne, ne + GGML_MAX_DIMS, metadata.ne.begin());
 
+            edge_moe_expert_layout layout;
             std::string error;
             if (!edge_moe_build_expert_layout(metadata, static_cast<size_t>(file_size_u), layout, error)) {
                 std::fprintf(stderr, "tensor=%s: invalid expert layout: %s\n", name.c_str(), error.c_str());
                 return false;
             }
-            model_path = path;
-            found = true;
-            break;
+            candidates.push_back({ path, layout });
         }
     }
 
-    if (!found) {
+    if (candidates.empty()) {
         std::fprintf(stderr, "no tensor found for layer=%u part=%s\n",
             params.layer, edge_moe_tensor_part_name(params.part));
         return false;
+    }
+
+    const auto has_part = [&candidates](const edge_moe_tensor_part part) {
+        return std::any_of(candidates.begin(), candidates.end(), [part](const model_layout & candidate) {
+            return candidate.layout.part == part;
+        });
+    };
+
+    std::vector<edge_moe_tensor_part> selected_parts;
+    if (params.part == edge_moe_tensor_part::gate_up) {
+        std::string error;
+        if (!select_gate_up_parts(
+                has_part(edge_moe_tensor_part::gate_up),
+                has_part(edge_moe_tensor_part::gate),
+                has_part(edge_moe_tensor_part::up),
+                selected_parts,
+                error)) {
+            std::fprintf(stderr, "layer=%u part=gate_up: %s\n", params.layer, error.c_str());
+            return false;
+        }
+        if (selected_parts.size() == 2) {
+            std::printf("part=gate_up layout=split tensors=gate,up\n");
+        }
+    } else {
+        selected_parts.push_back(params.part);
+    }
+
+    std::vector<const model_layout *> selected;
+    for (const edge_moe_tensor_part part : selected_parts) {
+        const auto found = std::find_if(candidates.begin(), candidates.end(), [part](const model_layout & candidate) {
+            return candidate.layout.part == part;
+        });
+        if (found == candidates.end()) {
+            std::fprintf(stderr, "no tensor found for layer=%u part=%s\n",
+                params.layer, edge_moe_tensor_part_name(part));
+            return false;
+        }
+        selected.push_back(&*found);
     }
 
     uint32_t slot_count = params.slots == 0 ? static_cast<uint32_t>(params.experts.size()) : params.slots;
@@ -428,42 +513,52 @@ bool run_model_probe(const options & params) {
         std::fprintf(stderr, "slot count must be greater than zero\n");
         return false;
     }
-    edge_moe_resident_slots slots(layout.expert_count, slot_count, layout.expert_stride);
-    std::printf("tensor=%s layer=%u part=%s expert_count=%u slot_count=%u slot_bytes=%zu\n",
-        layout.tensor.name.c_str(), params.layer, edge_moe_tensor_part_name(layout.part),
-        layout.expert_count, slot_count, layout.expert_stride);
 
-    size_t loaded = 0;
-    for (const uint32_t expert : params.experts) {
-        if (expert >= layout.expert_count) {
-            std::fprintf(stderr, "expert %u is outside [0, %u)\n", expert, layout.expert_count);
-            return false;
+    size_t total_loaded = 0;
+    for (const model_layout * source : selected) {
+        const edge_moe_expert_layout & layout = source->layout;
+        edge_moe_resident_slots slots(layout.expert_count, slot_count, layout.expert_stride);
+        std::printf("tensor=%s layer=%u part=%s expert_count=%u slot_count=%u slot_bytes=%zu\n",
+            layout.tensor.name.c_str(), params.layer, edge_moe_tensor_part_name(layout.part),
+            layout.expert_count, slot_count, layout.expert_stride);
+
+        size_t loaded = 0;
+        for (const uint32_t expert : params.experts) {
+            if (expert >= layout.expert_count) {
+                std::fprintf(stderr, "expert %u is outside [0, %u)\n", expert, layout.expert_count);
+                return false;
+            }
+            std::vector<uint8_t> data;
+            if (!read_range(source->path, layout.ranges[expert], data)) {
+                std::fprintf(stderr, "expert %u: failed to read source range\n", expert);
+                return false;
+            }
+            std::string error;
+            if (!slots.load_blocking(expert, data.data(), data.size(), loaded, error)) {
+                std::fprintf(stderr, "expert %u: blocking load failed: %s\n", expert, error.c_str());
+                return false;
+            }
+            uint32_t physical_slot = 0;
+            if (!slots.resolve(expert, physical_slot) ||
+                std::memcmp(slots.slot_data(physical_slot), data.data(), data.size()) != 0) {
+                std::fprintf(stderr, "expert %u: resident slot data mismatch\n", expert);
+                return false;
+            }
+            if (!slots.begin_use(expert, loaded, physical_slot, error) || !slots.end_use(expert, error)) {
+                std::fprintf(stderr, "expert %u: use lifetime check failed: %s\n", expert, error.c_str());
+                return false;
+            }
+            std::printf("  logical_expert=%u physical_slot=%u offset=%zu size=%zu hash=0x%016" PRIx64 " state=resident\n",
+                expert, physical_slot, layout.ranges[expert].offset, data.size(), fnv1a64(data));
+            ++loaded;
         }
-        std::vector<uint8_t> data;
-        if (!read_range(model_path, layout.ranges[expert], data)) {
-            std::fprintf(stderr, "expert %u: failed to read source range\n", expert);
-            return false;
-        }
-        std::string error;
-        if (!slots.load_blocking(expert, data.data(), data.size(), loaded, error)) {
-            std::fprintf(stderr, "expert %u: blocking load failed: %s\n", expert, error.c_str());
-            return false;
-        }
-        uint32_t physical_slot = 0;
-        if (!slots.resolve(expert, physical_slot) ||
-            std::memcmp(slots.slot_data(physical_slot), data.data(), data.size()) != 0) {
-            std::fprintf(stderr, "expert %u: resident slot data mismatch\n", expert);
-            return false;
-        }
-        if (!slots.begin_use(expert, loaded, physical_slot, error) || !slots.end_use(expert, error)) {
-            std::fprintf(stderr, "expert %u: use lifetime check failed: %s\n", expert, error.c_str());
-            return false;
-        }
-        std::printf("  logical_expert=%u physical_slot=%u offset=%zu size=%zu hash=0x%016" PRIx64 " state=resident\n",
-            expert, physical_slot, layout.ranges[expert].offset, data.size(), fnv1a64(data));
-        ++loaded;
+        std::printf("summary: loaded=%zu slots=%u errors=0\n", loaded, slot_count);
+        total_loaded += loaded;
     }
-    std::printf("summary: loaded=%zu slots=%u errors=0\n", loaded, slot_count);
+    if (selected.size() > 1) {
+        std::printf("combined_summary: tensors=%zu loaded=%zu slots_per_tensor=%u errors=0\n",
+            selected.size(), total_loaded, slot_count);
+    }
     return true;
 }
 

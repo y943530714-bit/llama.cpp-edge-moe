@@ -24,16 +24,16 @@
 - `.moepack` sidecar。
 - resident-slot 原型尚未接入默认模型推理 graph，也没有隐式 eviction。
 
-因此，本手册中的结果用于确认 M0/PR-2 前置条件，不代表已经开启低内存 MoE 推理优化。
+因此，本手册中的结果用于确认 M0/PR-3 前置条件，不代表已经开启低内存 MoE 推理优化。
 
 ## 2. 准备环境
 
 需要：
 
-- macOS 或 Linux；
+- Windows、macOS 或 Linux；
 - C++17 编译器和 CMake；
 - 目标 backend 的依赖。M4 Mac mini 使用 Metal；
-- 一个实际的 Qwen3.5-35B-A3B GGUF 模型；
+- 一个实际的 Qwen3.5/Qwen3.6-35B-A3B GGUF 模型；
 - 足够的临时磁盘空间。SSD 测试会创建并删除临时文件。
 
 以下命令均从仓库根目录执行。
@@ -51,7 +51,14 @@ CPU-only：
 
 ```bash
 cmake -B build -DGGML_METAL=OFF -DLLAMA_CURL=OFF
-cmake --build build --config Release -j --target llama-cli llama-edge-moe-layout
+cmake --build build --config Release -j --target llama-cli llama-edge-moe-layout llama-edge-moe-slot-probe
+```
+
+Windows/MSVC CPU-only：
+
+```powershell
+cmake -S . -B build-win -G "Visual Studio 17 2022" -A x64 -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF
+cmake --build build-win --config Release --parallel --target llama-cli llama-edge-moe-layout llama-edge-moe-slot-probe
 ```
 
 检查工具是否生成：
@@ -59,6 +66,7 @@ cmake --build build --config Release -j --target llama-cli llama-edge-moe-layout
 ```bash
 test -x ./build/bin/llama-cli
 test -x ./build/bin/llama-edge-moe-layout
+test -x ./build/bin/llama-edge-moe-slot-probe
 ```
 
 ## 4. 推荐执行顺序
@@ -224,7 +232,7 @@ backend remap: ggml_mul_mat_id max_abs_diff=0
 resident lifecycle: refcount/eviction/generation=ok
 ```
 
-再对真实 GGUF 的某一层加载选中的 expert range。该命令只读取指定的 expert slice，不进入默认 llama.cpp 推理路径：
+再对真实 GGUF 的某一层加载选中的 expert range。该命令只读取指定的 expert slice，不进入默认 llama.cpp 推理路径。对 `--part gate_up`，工具优先使用融合的 `ffn_gate_up_exps` tensor；如果模型使用分离的 `ffn_gate_exps` 和 `ffn_up_exps`，则自动为二者建立独立 slot arena 并逐一验证：
 
 ```bash
 ./build/bin/llama-edge-moe-slot-probe \
@@ -235,10 +243,16 @@ resident lifecycle: refcount/eviction/generation=ok
   --slots 4
 ```
 
-预期最后一行包含：
+融合 tensor 的预期最后一行包含：
 
 ```text
 summary: loaded=4 slots=4 errors=0
+```
+
+分离 gate/up tensor 会分别输出两行上述 summary，并以以下汇总结束：
+
+```text
+combined_summary: tensors=2 loaded=8 slots_per_tensor=4 errors=0
 ```
 
 如果指定的 expert 数量大于 `--slots`，当前原型会因没有空闲 slot 而失败；这是刻意保留的显式 blocking 行为，后续 runtime 再接入 safe-point eviction。
