@@ -491,6 +491,10 @@ struct common_params {
     ggml_backend_sched_eval_callback cb_eval = nullptr;
     void * cb_eval_user_data                 = nullptr;
 
+    // write MoE routing tensors as JSONL for offline cache analysis
+    std::string edge_moe_trace_path;
+    uint64_t edge_moe_trace_max_events = 0; // 0 = unlimited
+
     ggml_numa_strategy numa = GGML_NUMA_STRATEGY_DISABLED;
 
     enum llama_rope_scaling_type rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED;
