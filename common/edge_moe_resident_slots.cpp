@@ -4,6 +4,14 @@
 #include <limits>
 #include <stdexcept>
 
+namespace {
+
+uint32_t next_generation(const uint32_t generation) {
+    return generation == std::numeric_limits<uint32_t>::max() ? 1 : generation + 1;
+}
+
+} // namespace
+
 edge_moe_resident_slots::edge_moe_resident_slots(
         const uint32_t logical_expert_count,
         const uint32_t slot_count,
@@ -67,30 +75,53 @@ bool edge_moe_resident_slots::load_blocking(
 
     int physical_slot = logical_to_slot_[logical_expert];
     if (physical_slot >= 0) {
+        if (!valid_slot(static_cast<uint32_t>(physical_slot))) {
+            error = "logical-to-physical mapping points outside the arena";
+            return false;
+        }
+
         edge_moe_slot_meta & meta = slots_[physical_slot];
+        if (meta.logical_expert != static_cast<int32_t>(logical_expert)) {
+            error = "logical-to-physical mapping metadata is inconsistent";
+            return false;
+        }
         if (meta.refcnt != 0 || meta.state == edge_moe_slot_state::in_use) {
             error = "cannot reload an expert that is in use";
             return false;
         }
-        meta.state = edge_moe_slot_state::loading;
+        if (meta.state != edge_moe_slot_state::resident) {
+            error = "resident slot is not ready for blocking reload";
+            return false;
+        }
     } else {
         physical_slot = find_free_slot();
         if (physical_slot < 0) {
             error = "no free resident slot; evict explicitly before loading";
             return false;
         }
+
         edge_moe_slot_meta & meta = slots_[physical_slot];
+        const uint32_t generation = meta.generation;
         meta = {};
+        meta.generation = generation;
         meta.state = edge_moe_slot_state::loading;
         meta.logical_expert = static_cast<int32_t>(logical_expert);
         logical_to_slot_[logical_expert] = physical_slot;
     }
 
-    std::memcpy(data_.data() + static_cast<size_t>(physical_slot) * slot_bytes_, data, slot_bytes_);
     edge_moe_slot_meta & meta = slots_[physical_slot];
+    const uint32_t generation = next_generation(meta.generation);
+    meta.state = edge_moe_slot_state::loading;
+
+    // memmove is intentional: callers may reload from a view into this slot.
+    std::memmove(
+        data_.data() + static_cast<size_t>(physical_slot) * slot_bytes_,
+        data,
+        slot_bytes_);
+
     meta.state = edge_moe_slot_state::resident;
     meta.last_used_token = token;
-    ++meta.generation;
+    meta.generation = generation;
     return true;
 }
 
@@ -114,7 +145,7 @@ bool edge_moe_resident_slots::begin_use(
     }
 
     edge_moe_slot_meta & meta = slots_[physical_slot];
-    if (meta.state == edge_moe_slot_state::loading || meta.state == edge_moe_slot_state::evict_pending) {
+    if (meta.state != edge_moe_slot_state::resident && meta.state != edge_moe_slot_state::in_use) {
         error = "resident slot is not ready for use";
         return false;
     }
@@ -153,12 +184,16 @@ bool edge_moe_resident_slots::evict(const uint32_t logical_expert, std::string &
     }
 
     edge_moe_slot_meta & meta = slots_[physical_slot];
-    if (meta.refcnt != 0 || meta.state == edge_moe_slot_state::in_use || meta.state == edge_moe_slot_state::loading) {
-        error = "cannot evict an active resident slot";
+    if (meta.state != edge_moe_slot_state::resident || meta.refcnt != 0) {
+        error = "cannot evict an active or non-resident slot";
         return false;
     }
+
+    const uint32_t generation = meta.generation;
     logical_to_slot_[logical_expert] = -1;
     meta = {};
+    // Keep the generation monotonic across free/rebind cycles.
+    meta.generation = generation;
     return true;
 }
 

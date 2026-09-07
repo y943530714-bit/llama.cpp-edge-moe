@@ -1,4 +1,4 @@
-# EdgeMoE-Llama M0 / PR-2 运行手册
+# EdgeMoE-Llama M0 / PR-3 运行手册
 
 本文对应 `edge_moe_design_v1.1.md` 的 M0 和 PR-2。当前代码只做测量、路由观测和 expert range 验证，不会改变默认 llama.cpp 推理路径。
 
@@ -14,12 +14,12 @@
 - `llama-edge-moe-layout`：检查 GGUF routed expert tensor 的维度、量化 block 对齐、文件边界和 expert slice offset/size；
 - 可选读取 expert slice，并调用 `ggml_validate_row_data` 验证原始数据。
 - `llama-edge-moe-slot-probe`：验证固定 resident slots、blocking load、logical-to-physical remap，以及 generic CPU `ggml_mul_mat_id` 的等价结果。
+- resident-slot lifecycle 自测：在用时禁止驱逐/重载，显式驱逐后允许复用，并保持 generation 单调递增。
 
 尚未实现：
 
-- expert streaming 和 per-layer resident slots；
-- logical-to-physical slot remap；
-- 异步 I/O、P0/P1/P2 调度和 cache eviction；
+- 默认模型推理路径中的 expert streaming 和 per-layer resident slots 接入；
+- 异步 I/O、P0/P1/P2 调度和自动 cache eviction；
 - Gate-First split graph、prefill double buffer 和 MTP prefetch；
 - `.moepack` sidecar。
 - resident-slot 原型尚未接入默认模型推理 graph，也没有隐式 eviction。
@@ -221,6 +221,7 @@ summary: matched_tensors=... expert_ranges=... verified_ranges=... errors=0
 ```text
 resident slots: logical 1->physical 0, logical 3->physical 1
 backend remap: ggml_mul_mat_id max_abs_diff=0
+resident lifecycle: refcount/eviction/generation=ok
 ```
 
 再对真实 GGUF 的某一层加载选中的 expert range。该命令只读取指定的 expert slice，不进入默认 llama.cpp 推理路径：
@@ -335,4 +336,4 @@ git rev-parse HEAD >> ./m0-results/system.txt
 
 ## 7. 下一步
 
-当真实 Qwen3.5 trace 和 PR-2 range 验证通过后，下一步按 v1.1 实现一个单层/少量层的 blocking resident-slot prototype，再验证 generic ggml backend buffer、现有 `mul_mat_id` 和 logical-to-physical remap 的控制开销。此之前不固化 LRU、MTP 或 approximate skip 策略。
+当前 PR-3 仍是独立 blocking prototype。下一步应在不改变 exact 输出的前提下，把 range reader、generation/event 和 cache admission 拆成可测试的 M2 runtime，再接入默认模型 graph；在此之前不启用隐式 eviction、MTP 或 approximate skip。
