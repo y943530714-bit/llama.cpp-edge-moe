@@ -218,48 +218,50 @@ bool run_backend_self_test() {
     edge_moe_resident_slots lifecycle(logical_expert_count, resident_slot_count, expert_bytes);
     if (!lifecycle.load_blocking(1, weights.data() + expert_elements, expert_bytes, 1, error) ||
         !lifecycle.load_blocking(3, weights.data() + 3 * expert_elements, expert_bytes, 1, error)) {
-        std::fprintf(stderr, "self-test: lifecycle setup failed: %s\\n", error.c_str());
+        std::fprintf(stderr, "self-test: lifecycle setup failed: %s\n", error.c_str());
         return false;
     }
 
-    uint32_t lifecycle_slot = 0;
-    if (!lifecycle.begin_use(1, 2, lifecycle_slot, error) ||
+    uint32_t lifecycle_slot1 = 0;
+    if (!lifecycle.begin_use(1, 2, lifecycle_slot1, error) ||
         lifecycle.evict(1, error) ||
         !lifecycle.end_use(1, error)) {
-        std::fprintf(stderr, "self-test: active-slot eviction guard failed\\n");
-        return false;
-    }
-    if (!lifecycle.begin_use(3, 3, lifecycle_slot, error) ||
-        lifecycle.load_blocking(3, weights.data() + 3 * expert_elements, expert_bytes, 4, error) ||
-        !lifecycle.end_use(3, error)) {
-        std::fprintf(stderr, "self-test: active-slot reload guard failed\\n");
+        std::fprintf(stderr, "self-test: active-slot eviction guard failed\n");
         return false;
     }
 
-    const edge_moe_slot_meta * first_meta = lifecycle.slot_meta(lifecycle_slot);
+    uint32_t lifecycle_slot3 = 0;
+    if (!lifecycle.begin_use(3, 3, lifecycle_slot3, error) ||
+        lifecycle.load_blocking(3, weights.data() + 3 * expert_elements, expert_bytes, 4, error) ||
+        !lifecycle.end_use(3, error)) {
+        std::fprintf(stderr, "self-test: active-slot reload guard failed\n");
+        return false;
+    }
+
+    const edge_moe_slot_meta * first_meta = lifecycle.slot_meta(lifecycle_slot1);
     if (first_meta == nullptr) {
-        std::fprintf(stderr, "self-test: lifecycle metadata lookup failed\\n");
+        std::fprintf(stderr, "self-test: lifecycle metadata lookup failed\n");
         return false;
     }
     const uint32_t first_generation = first_meta->generation;
-    if (!lifecycle.evict(1, error) || lifecycle.resolve(1, lifecycle_slot)) {
-        std::fprintf(stderr, "self-test: explicit eviction failed\\n");
+    if (!lifecycle.evict(1, error) || lifecycle.resolve(1, lifecycle_slot1)) {
+        std::fprintf(stderr, "self-test: explicit eviction failed\n");
         return false;
     }
     if (!lifecycle.load_blocking(2, weights.data() + 2 * expert_elements, expert_bytes, 5, error)) {
-        std::fprintf(stderr, "self-test: slot rebind failed: %s\\n", error.c_str());
+        std::fprintf(stderr, "self-test: slot rebind failed: %s\n", error.c_str());
         return false;
     }
-    const edge_moe_slot_meta * rebound_meta = lifecycle.slot_meta(lifecycle_slot);
+    const edge_moe_slot_meta * rebound_meta = lifecycle.slot_meta(lifecycle_slot1);
     if (rebound_meta == nullptr || rebound_meta->generation != first_generation + 1) {
-        std::fprintf(stderr, "self-test: slot generation was not monotonic\\n");
+        std::fprintf(stderr, "self-test: slot generation was not monotonic\n");
         return false;
     }
     if (lifecycle.load_blocking(0, weights.data(), expert_bytes, 6, error)) {
-        std::fprintf(stderr, "self-test: full-arena load was unexpectedly accepted\\n");
+        std::fprintf(stderr, "self-test: full-arena load was unexpectedly accepted\n");
         return false;
     }
-    std::printf("resident lifecycle: refcount/eviction/generation=ok\\n");
+    std::printf("resident lifecycle: refcount/eviction/generation=ok\n");
 
     ggml_backend_load_all();
     ggml_backend_ptr backend(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
