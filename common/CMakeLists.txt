@@ -75,6 +75,8 @@ add_library(${TARGET}
     download.h
     edge_moe_layout.cpp
     edge_moe_layout.h
+    edge_moe_resident_slots.cpp
+    edge_moe_resident_slots.h
     edge_moe_trace.cpp
     edge_moe_trace.h
     fit.cpp

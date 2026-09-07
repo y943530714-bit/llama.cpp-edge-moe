@@ -13,6 +13,7 @@
 - 离线 expert cache simulator；
 - `llama-edge-moe-layout`：检查 GGUF routed expert tensor 的维度、量化 block 对齐、文件边界和 expert slice offset/size；
 - 可选读取 expert slice，并调用 `ggml_validate_row_data` 验证原始数据。
+- `llama-edge-moe-slot-probe`：验证固定 resident slots、blocking load、logical-to-physical remap，以及 generic CPU `ggml_mul_mat_id` 的等价结果。
 
 尚未实现：
 
@@ -21,6 +22,7 @@
 - 异步 I/O、P0/P1/P2 调度和 cache eviction；
 - Gate-First split graph、prefill double buffer 和 MTP prefetch；
 - `.moepack` sidecar。
+- resident-slot 原型尚未接入默认模型推理 graph，也没有隐式 eviction。
 
 因此，本手册中的结果用于确认 M0/PR-2 前置条件，不代表已经开启低内存 MoE 推理优化。
 
@@ -206,7 +208,41 @@ summary: matched_tensors=... expert_ranges=... verified_ranges=... errors=0
 
 `--alignment` 是额外的 I/O 边界检查。如果模型 slice 不满足 4096 字节对齐，只说明当前模型布局不能直接满足该 direct-I/O 假设，不代表 GGUF 本身损坏。
 
-### 4.7 运行离线 cache simulator
+### 4.7 验证 blocking resident-slot prototype（PR-3）
+
+先运行不需要模型的 backend 等价性自测：
+
+```bash
+./build/bin/llama-edge-moe-slot-probe --self-test
+```
+
+预期输出包含：
+
+```text
+resident slots: logical 1->physical 0, logical 3->physical 1
+backend remap: ggml_mul_mat_id max_abs_diff=0
+```
+
+再对真实 GGUF 的某一层加载选中的 expert range。该命令只读取指定的 expert slice，不进入默认 llama.cpp 推理路径：
+
+```bash
+./build/bin/llama-edge-moe-slot-probe \
+  --model /path/to/model.gguf \
+  --layer 0 \
+  --part gate_up \
+  --experts 0,1,3,7 \
+  --slots 4
+```
+
+预期最后一行包含：
+
+```text
+summary: loaded=4 slots=4 errors=0
+```
+
+如果指定的 expert 数量大于 `--slots`，当前原型会因没有空闲 slot 而失败；这是刻意保留的显式 blocking 行为，后续 runtime 再接入 safe-point eviction。
+
+### 4.8 运行离线 cache simulator
 
 先模拟完整的 prefill-to-decode handoff：
 

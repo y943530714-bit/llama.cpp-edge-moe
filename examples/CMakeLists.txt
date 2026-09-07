@@ -20,6 +20,7 @@ else()
     add_subdirectory(eval-callback)
 
     add_subdirectory(edge-moe-layout)
+    add_subdirectory(edge-moe-slot-probe)
 
     add_subdirectory(gguf-hash)
     add_subdirectory(gguf)

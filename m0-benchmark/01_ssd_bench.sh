@@ -37,7 +37,7 @@ trap cleanup EXIT
 
 size_mb=$((size_gb * 1024))
 echo "creating $size_gb GiB test file on: $bench_dir"
-dd if=/dev/zero of="$test_file" bs=1m count="$size_mb" conv=fsync >/dev/null 2>&1
+dd if=/dev/zero of="$test_file" bs=1M count="$size_mb" conv=fsync >/dev/null 2>&1
 
 python3 - "$test_file" <<'PY'
 import os

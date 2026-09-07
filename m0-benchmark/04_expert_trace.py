@@ -61,6 +61,7 @@ def main() -> int:
         "-t", str(args.threads),
         "-ngl", args.gpu_layers,
         "--moe-trace", str(trace),
+        "--single-turn",
     ]
     if args.prompt is not None:
         command.extend(["-p", args.prompt])

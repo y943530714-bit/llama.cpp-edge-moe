@@ -40,7 +40,8 @@ does not change the model graph or its routing decisions. Warmup is disabled
 by default so the trace only contains the requested prompt and generation;
 pass `--warmup` when warmup traffic is part of the experiment. Tracing adds
 tensor copies and scheduler observation points, so use it for route data rather
-than latency measurements:
+than latency measurements. The wrapper always passes `--single-turn` so a
+non-TTY run exits after the requested generation:
 
 ```bash
 python3 m0-benchmark/04_expert_trace.py \
@@ -132,3 +133,29 @@ fixture and does not need a model:
 This PR validates the range layout and raw slice readability. It does not yet
 enable expert streaming, resident slots, asynchronous I/O, cache eviction, or
 split-graph execution.
+
+## Resident slot prototype (PR-3)
+
+`llama-edge-moe-slot-probe` is the first blocking resident-slot probe. It keeps
+the logical-to-physical mapping explicit, loads selected expert ranges into
+fixed per-layer host slots, and checks the copied bytes. It does not change
+normal model inference:
+
+```bash
+./build/bin/llama-edge-moe-slot-probe \
+  --model /path/to/model.gguf \
+  --layer 0 \
+  --part gate_up \
+  --experts 0,1,3,7 \
+  --slots 4
+```
+
+The self-test additionally compares full-resident and remapped slot tensors
+through the generic CPU `ggml_mul_mat_id` path:
+
+```bash
+./build/bin/llama-edge-moe-slot-probe --self-test
+```
+
+The prototype has no implicit eviction. If all slots are occupied, evict a
+logical expert explicitly in the runtime that integrates this class.

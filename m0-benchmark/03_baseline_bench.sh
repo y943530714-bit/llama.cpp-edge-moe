@@ -89,7 +89,7 @@ for mode in "${modes[@]}"; do
     log_file="$out_dir/baseline-${mode}.log"
     echo "=== load mode: $mode ==="
     print_system_state
-    command=("$llama_cli" -m "$model" --load-mode "$mode" -ngl "$gpu_layers" -c "$ctx_size" -n "$predict" -t "$threads" -p "$prompt")
+    command=("$llama_cli" -m "$model" --load-mode "$mode" -ngl "$gpu_layers" -c "$ctx_size" -n "$predict" -t "$threads" -p "$prompt" --single-turn)
     if [[ "$no_warmup" -eq 1 ]]; then
         command+=(--no-warmup)
     fi
