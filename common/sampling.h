@@ -88,6 +88,22 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
 // assume idxs == [ 0, 1, 2, ..., draft.size() ]
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first = false);
 
+// relaxed draft verification parameters (typical acceptance, Medusa/TRT-LLM style)
+struct common_sampler_relaxed_verify {
+    bool  enabled = false;
+    float eps     = 0.09f; // posterior threshold
+    float alpha   = 0.3f;  // entropy scaling factor
+};
+
+// like the overload above, but with rv.enabled the draft token is accepted
+// when its target-model probability exceeds min(rv.eps, rv.alpha * exp(-H))
+// where H is the entropy of the raw target distribution at that position;
+// rejected positions still sample a correction token from the target model
+std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const common_sampler_relaxed_verify & rv, bool grammar_first = false);
+
+// assume idxs == [ 0, 1, 2, ..., draft.size() ]
+std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, const common_sampler_relaxed_verify & rv, bool grammar_first = false);
+
 uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl);
 
 // force the reasoning budget sampler (if any) to begin forcing its end sequence now.

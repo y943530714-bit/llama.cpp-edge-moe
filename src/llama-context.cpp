@@ -272,6 +272,14 @@ llama_context::llama_context(
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
 
+    cparams.moe_skip_k1 = params.moe_skip_k1;
+    cparams.moe_skip_k2 = params.moe_skip_k2;
+    if (cparams.moe_skip_k1 < 0 || cparams.moe_skip_k2 < 0 ||
+            (cparams.moe_skip_k1 > 0 && cparams.moe_skip_k2 > 0 && cparams.moe_skip_k2 < cparams.moe_skip_k1)) {
+        throw std::runtime_error("invalid moe_skip k1=" + std::to_string(cparams.moe_skip_k1)
+            + " k2=" + std::to_string(cparams.moe_skip_k2) + " (need 0 <= k1 <= k2)");
+    }
+
     // initialized later
     cparams.pipeline_parallel = false;
 
@@ -3651,6 +3659,8 @@ llama_context_params llama_context_default_params() {
         /*.kv_unified                  =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
+        /*.moe_skip_k1                 =*/ 0,
+        /*.moe_skip_k2                 =*/ 0,
         /*.ctx_other                   =*/ nullptr,
     };
 

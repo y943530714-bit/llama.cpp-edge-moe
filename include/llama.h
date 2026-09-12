@@ -413,6 +413,12 @@ extern "C" {
         struct llama_sampler_seq_config * samplers;
         size_t                            n_samplers;
 
+        // edge MoE expert skipping: compute only the top-k1 routed experts and
+        // divide their weights by the probability mass of the top-k2 experts
+        // (0 = disabled for both)
+        int32_t moe_skip_k1;
+        int32_t moe_skip_k2;
+
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;

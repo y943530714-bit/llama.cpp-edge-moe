@@ -4219,6 +4219,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
     add_opt(common_arg(
+        {"--spec-relaxed-verify"},
+        {"--no-spec-relaxed-verify"},
+        "relaxed draft verification: accept draft tokens by typical acceptance instead of exact greedy match",
+        [](common_params & params, bool value) {
+            params.speculative.relaxed_verify = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-relaxed-eps"}, "P",
+        string_format("relaxed verify posterior threshold (default: %.2f)", (double)params.speculative.relaxed_verify_eps),
+        [](common_params & params, const std::string & value) {
+            params.speculative.relaxed_verify_eps = std::stof(value);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-relaxed-alpha"}, "P",
+        string_format("relaxed verify entropy scaling factor (default: %.2f)", (double)params.speculative.relaxed_verify_alpha),
+        [](common_params & params, const std::string & value) {
+            params.speculative.relaxed_verify_alpha = std::stof(value);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--spec-draft-backend-sampling"},
         {"--no-spec-draft-backend-sampling"},
         string_format("offload draft sampling to the backend (default: %s)",
@@ -4586,6 +4608,26 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("invalid value");
             }
             params.edge_moe_trace_max_events = static_cast<uint64_t>(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-skip-k1"}, "N",
+        "edge MoE expert skipping: compute only the top-k1 routed experts (0 = disabled, default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_skip_k1 = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-skip-k2"}, "N",
+        "edge MoE expert skipping: normalize the kept expert weights by the top-k2 probability mass (0 = use k1, default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.moe_skip_k2 = value;
         }
     ));
 

@@ -21,6 +21,9 @@ struct llama_cparams {
 
     int32_t  nextn_layer_offset = 0;
 
+    int32_t moe_skip_k1 = 0; // compute only the top-k1 routed experts (0 = disabled)
+    int32_t moe_skip_k2 = 0; // weight denominator is the top-k2 prob mass (0 = renorm over kept)
+
     float rope_freq_base;
     float rope_freq_scale;
 

@@ -705,6 +705,84 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return result;
 }
 
+// typical acceptance (Medusa/TRT-LLM style): accept the draft token when its
+// probability under the raw target distribution exceeds min(eps, alpha*exp(-H))
+static bool typical_accept(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, llama_token id, float eps, float alpha) {
+    const llama_model * model = llama_get_model(ctx);
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    const float * logits = llama_get_logits_ith(ctx, idx);
+    if (!logits) {
+        // backend sampling is active, the full distribution is not available
+        return false;
+    }
+
+    float max_logit = logits[0];
+    for (int t = 1; t < n_vocab; t++) {
+        max_logit = std::max(max_logit, logits[t]);
+    }
+
+    double sum = 0.0;
+    for (int t = 0; t < n_vocab; t++) {
+        sum += expf(logits[t] - max_logit);
+    }
+
+    double p_target = 0.0;
+    double entropy  = 0.0;
+    for (int t = 0; t < n_vocab; t++) {
+        const double p = expf(logits[t] - max_logit) / sum;
+        if (t == id) {
+            p_target = p;
+        }
+        entropy -= p * std::log(p);
+    }
+
+    const float thr = std::min(eps, alpha * (float) std::exp(-entropy));
+
+    return p_target > thr;
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, const common_sampler_relaxed_verify & rv, bool grammar_first) {
+    GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
+
+    std::vector<llama_token> result;
+    result.reserve(idxs.size());
+
+    // relaxed verification needs the raw target distribution, so it is
+    // disabled while a grammar constrains the sampler
+    const bool relaxed = rv.enabled && !grammar_should_apply(gsmpl);
+
+    size_t i = 0;
+    for (; i < draft.size(); i++) {
+        llama_token id;
+        if (relaxed && typical_accept(gsmpl, ctx, idxs[i], draft[i], rv.eps, rv.alpha)) {
+            id = draft[i];
+        } else {
+            id = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
+        }
+
+        common_sampler_accept(gsmpl, id, true);
+
+        result.push_back(id);
+
+        if (draft[i] != id) {
+            break;
+        }
+    }
+
+    if (i == draft.size()) {
+        const llama_token id = common_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
+
+        common_sampler_accept(gsmpl, id, true);
+
+        result.push_back(id);
+    }
+
+    return result;
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first) {
     std::vector<int> idxs(draft.size() + 1);
     for (size_t i = 0; i < idxs.size(); ++i) {
@@ -712,6 +790,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     }
 
     return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, const common_sampler_relaxed_verify & rv, bool grammar_first) {
+    std::vector<int> idxs(draft.size() + 1);
+    for (size_t i = 0; i < idxs.size(); ++i) {
+        idxs[i] = i;
+    }
+
+    return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, rv, grammar_first);
 }
 
 uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl) {

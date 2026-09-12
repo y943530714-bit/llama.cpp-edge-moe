@@ -255,7 +255,12 @@ int main(int argc, char ** argv) {
         // available logits from the batch and sample the next token until we run out of logits or the sampler
         // disagrees with the draft
         //
-        auto ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+        common_sampler_relaxed_verify rv;
+        rv.enabled = params.speculative.relaxed_verify;
+        rv.eps     = params.speculative.relaxed_verify_eps;
+        rv.alpha   = params.speculative.relaxed_verify_alpha;
+
+        auto ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft, rv);
 
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
 

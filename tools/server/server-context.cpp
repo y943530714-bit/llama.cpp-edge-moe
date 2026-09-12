@@ -3896,8 +3896,12 @@ private:
 
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
                 const auto & synth_probs = common_speculative_get_synth_probs(spec.get());
+                common_sampler_relaxed_verify rv;
+                rv.enabled = params_base.speculative.relaxed_verify;
+                rv.eps     = params_base.speculative.relaxed_verify_eps;
+                rv.alpha   = params_base.speculative.relaxed_verify_alpha;
                 auto accepted = synth_probs.empty()
-                    ? common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft)
+                    ? common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft, rv)
                     : server_sample_and_accept_synth(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft,
                             synth_probs, slot.spec_synth_rng, slot.spec_is_replay);

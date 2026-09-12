@@ -376,6 +376,13 @@ struct common_params_speculative {
     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
     common_params_speculative_draft draft;
 
+    // relaxed verification of draft tokens (typical acceptance, Medusa/TRT-LLM style)
+    // a draft token is accepted if its target-model probability exceeds
+    // min(eps, alpha * exp(-entropy)) instead of requiring an exact greedy match
+    bool  relaxed_verify      = false;
+    float relaxed_verify_eps  = 0.09f;  // posterior threshold
+    float relaxed_verify_alpha = 0.3f;  // entropy scaling factor
+
     common_params_speculative_ngram_mod ngram_mod;
     common_params_speculative_ngram_map ngram_simple;
     common_params_speculative_ngram_map ngram_map_k;
@@ -494,6 +501,10 @@ struct common_params {
     // write MoE routing tensors as JSONL for offline cache analysis
     std::string edge_moe_trace_path;
     uint64_t edge_moe_trace_max_events = 0; // 0 = unlimited
+
+    // edge MoE expert skipping (arXiv:2609.04575)
+    int32_t moe_skip_k1 = 0; // compute only the top-k1 routed experts (0 = disabled)
+    int32_t moe_skip_k2 = 0; // weight denominator is the top-k2 prob mass (0 = k1)
 
     ggml_numa_strategy numa = GGML_NUMA_STRATEGY_DISABLED;
 

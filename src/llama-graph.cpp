@@ -2123,16 +2123,48 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
     cb(weights, "ffn_moe_weights", il);
 
+    // edge MoE expert skipping (arXiv:2609.04575): compute only the top-k1
+    // selected experts, normalizing their weights by the top-k2 probability
+    // mass so the per-token gain stays below the trained renormalization
+    const int64_t moe_k1 = cparams.moe_skip_k1;
+    const int64_t moe_k2 = cparams.moe_skip_k2;
+    const bool moe_skip = moe_k1 > 0 && moe_k1 < n_expert_used
+        && arch != LLM_ARCH_GROVEMOE && selected_experts->ne[0] == n_expert_used;
+    const int64_t n_used_eff = moe_skip ? moe_k1 : n_expert_used;
+
+    if (moe_skip) {
+        const int64_t k2c = std::min<int64_t>(moe_k2 > 0 ? moe_k2 : moe_k1, n_expert);
+
+        // keep the full top-k selection above for tracing; the effective ids
+        // and weights only cover the first k1 rows (ranked by weight)
+        ggml_tensor * sel_eff = ggml_cont(ctx0, ggml_view_2d(ctx0, selected_experts,
+                    moe_k1, n_tokens, selected_experts->nb[1], 0));
+        ggml_tensor * w_eff = ggml_cont(ctx0, ggml_view_3d(ctx0, weights,
+                    1, moe_k1, n_tokens, weights->nb[1], weights->nb[2], 0));
+
+        ggml_tensor * probs2 = ggml_reshape_2d(ctx0, probs, n_expert, n_tokens);
+        ggml_tensor * topk2_vals = ggml_get_rows(ctx0, probs,
+                ggml_argsort_top_k(ctx0, probs2, k2c)); // [1, k2c, n_tokens]
+        ggml_tensor * denom = ggml_sum_rows(ctx0,
+                ggml_reshape_2d(ctx0, topk2_vals, k2c, n_tokens)); // [1, n_tokens]
+
+        w_eff = ggml_div(ctx0, w_eff, ggml_reshape_3d(ctx0, denom, 1, 1, n_tokens));
+        cb(w_eff, "ffn_moe_weights_skip", il);
+
+        selected_experts = sel_eff; // [k1, n_tokens]
+        weights = w_eff;            // [1, k1, n_tokens]
+    }
+
 
     if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
-        weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+        weights = ggml_reshape_2d(ctx0, weights, n_used_eff, n_tokens);
+        weights = ggml_soft_max(ctx0, weights); // [n_used_eff, n_tokens]
+        weights = ggml_reshape_3d(ctx0, weights, 1, n_used_eff, n_tokens);
         cb(weights, "ffn_moe_weights_softmax", il);
     }
 
-    if (norm_w) {
-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+    if (norm_w && !moe_skip) {
+        weights = ggml_reshape_2d(ctx0, weights, n_used_eff, n_tokens);
 
         ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
         cb(weights_sum, "ffn_moe_weights_sum", il);
@@ -2141,10 +2173,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
         cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
 
-        weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
+        weights = ggml_div(ctx0, weights, weights_sum); // [n_used_eff, n_tokens]
         cb(weights, "ffn_moe_weights_norm", il);
 
-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+        weights = ggml_reshape_3d(ctx0, weights, 1, n_used_eff, n_tokens);
     }
     if (w_scale != 0.0f && w_scale != 1.0f) {
         weights = ggml_scale(ctx0, weights, w_scale);
@@ -2157,8 +2189,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
     if (weight_before_ffn) {
-        // repeat cur to [n_embd, n_expert_used, n_tokens]
-        ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
+        // repeat cur to [n_embd, n_used_eff, n_tokens]
+        ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_used_eff, n_tokens, 1);
         cur = ggml_mul(ctx0, repeated, weights);
         cb(cur, "ffn_moe_weighted", il);
     }
@@ -2328,7 +2360,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     // Use per-layer n_expert_used to bound the graph even during warmup (avoids
     // the large-add-nodes issue for uniform arches; for Puzzle the per-layer
     // value is correct). ref: https://github.com/ggml-org/llama.cpp/pull/14753
-    const uint32_t n_expert_used_il = hparams.n_expert_used(il);
+    const uint32_t n_expert_used_il = moe_skip ? (uint32_t) n_used_eff : hparams.n_expert_used(il);
     for (uint32_t i = 0; i < n_expert_used_il; ++i) {
         cur_experts[i] = ggml_view_2d(ctx0, experts, n_embd, n_tokens, experts->nb[2], i*experts->nb[1]);
 
