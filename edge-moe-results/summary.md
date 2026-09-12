@@ -108,6 +108,14 @@ relaxed verify（Medusa/TRT-LLM typical acceptance，eps=0.09, alpha=0.3）将�
 
 剩余差距（85% vs 理想 99%）：每个请求自己的 prefill 一次性冷页（1.1-11.8GB）仍在 decode 前搅动缓存——需要 admission 控制（冷页直通不缓存）或应用层 expert arena（M4）。TPOT 仍高于 0.75s 热态上限，同因。
 
+**逐 token 延迟曲线（修正"prefill 搅动"的范围）**：对 server 发单请求并抓取每个 chunk 的 per-token 延迟：
+
+- 冷启动第一请求（p0）：prefill 162s，decode 延迟**递增** 1049 -> 1612 ms/tok（26 步尾均）——不是前几步慢，而是随生成展开持续上升：无预取时空缓存，prefill 只预热了它自己计算的那部分专家（11-28 个/层），decode 的 124 次抽取覆盖面超出它，新专家持续进入 -> miss 分布在整个 decode 而非集中在前几步
+- 同题第二请求：**平坦 627 ms/tok（= CPU 瓶颈）**，prefill 58s（页面已缓存）——缓存充分生效后没有任何持续 miss，89.7% 重用率的直接体现
+- 新题首请求（p10）：起步 653ms、稳态 ~1015 ms/tok——它自己的 prefill 已预热了大部分热集，只有温和的展开成本
+
+结论：洪泛消除后，**稳态 decode 已达 CPU 瓶颈（627ms）**，聚合 TPOT 1.5-2.1s 主要由"冷启动第一请求"与"新题首请求的展开成本"抬高。工程含义：server 启动后用 1-2 个代表性请求预热即可让后续请求进入 0.6-1.0s 稳态（即最初的预热建议，代价极低）；admission/arena 的优先级下降，仅对"冷启动首请求"的 TTFT 有意义。
+
 ## 4. 生成质量抽查
 
 problem 0 四个配置（贪心）输出前缀逐 token 一致，专家跳过与 relaxed verify 未破坏生成连贯性（与论文报告的 MMLU -0.35 分一致）。
