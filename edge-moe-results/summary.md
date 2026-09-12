@@ -54,6 +54,16 @@ relaxed verify（Medusa/TRT-LLM typical acceptance，eps=0.09, alpha=0.3）将�
 
 注意区分两个"命中率"：本节是运行时 DRAM 命中率（SSD vs 内存）；第 3 节的 31.5% 是离线设计指标（被跳过专家被 top-16 热窗覆盖的比例）。页缓存较热的状态（连续重复同题后）TPOT 可到 750-850ms，说明命中率随缓存状态在 0 与较高值之间波动；6.5GB 工作集理论上可驻留每层约 47/64 个在用专家（上限 ~70%），但 Windows 在全局内存压力下不做专家感知的驻留，实际归零。这正是专家跳过能兑现 2.1x 的原因，也是下一步做预取/驻留调度的依据。
 
+## 3.1.1 mmap 缓存与逐出机制、命中率成因（补充，2026-09-12）
+
+系统没有专家感知的缓存或逐出策略：llama.cpp 仅 mmap 文件，驻留与逐出全部由 Windows 内存管理器按 4KB 页粒度完成（工作集上限 trim -> standby list -> 全局近似 LRU 老化回收；cache manager 对连续缺页流做预读）。命中率高低的根源是访问模式的重用距离：
+
+- 单步 decode 触碰 311MB（4 专家 x 40 层），远小于 6.5GB 工作集 -> 一步之内 40 层的专家页共存，不存在"后层加载冲掉前层"。
+- 用 trace 实测已计算专家（top-4）的重用间隔：中位 3 步、均值 10.5 步（约 3.3GB 中间流量）、p90 = 31 步（约 9.6GB，接近缓存容量）。命中 = 页在其重用间隔内存活；未命中集中在长尾间隔上。
+- 路由高度集中使 decode 热集只有 ~5GB（5 题合计，每层 34-105 个唯一专家；单题约 1.5-2.5GB），在工作集 + standby 里装得下 -> 预热后命中率 59-80%。被逐出的牺牲者几乎都是 prefill 触碰过一次的冷专家（每层其余 ~200 个）——正确的牺牲者。
+- 冷态崩到 0-10% 的轮换源：每次进程加载对 22GB 文件做全文件 PrefetchVirtualMemory（init_mappings(true)，顺序填满 standby）+ 加载期 fit 构图 + 其他请求的 prefill 流量；热页在重用间隔内被挤出。OS 级精确归因（cap trim 循环 vs standby 回收顺序）未做最终定位。
+- 推论：OS 只是因为"热集恰好装得下"才表现良好。专家感知的驻留窗口（钉住热集、跳过全文件预取、防止一次性冷页洪泛）能把命中率稳定在高位并消除冷态崩塌，即 M4 计划的价值。
+
 ## 3.2 预热与 server 模式（补充，2026-09-12）
 
 预热实验（连续 4 个 cli 进程：p0 预热、p5 预热、p0 复测、p10 新题，测量 decode 窗口的系统缺页读入）：
@@ -64,7 +74,7 @@ relaxed verify（Medusa/TRT-LLM typical acceptance，eps=0.09, alpha=0.3）将�
 
 结论：**预热确实把命中率从 0-10% 提升到 59-80%**，且新题的 prefill 扫描本身就会把该题 decode 需要的热集装入缓存（prefill 是最好的预热器）。
 
-llama-server 模式实测两次均在加载阶段把可用内存压到 0.6GB 以下（硬工作集上限也无法约束加载器的全文件预取+初始化触碰），存在挂机风险，本机放弃。机制上 server 也不会更好：cli 与 server 加载都会对 22GB 文件做 PrefetchVirtualMemory（llama_model.cpp init_mappings(true)），而命中率的主要搅动者는每个请求自己的 prefill 全专家扫描（~19.5GB），server 同样要做；server 仅省下 cli 每题一次的启动预取洪泛，收益是小头。要让本机能跑 server，需先给加载器加"跳过全文件预取"开关。
+llama-server 模式实测两次均在加载阶段把可用内存压到 0.6GB 以下（硬工作集上限也无法约束加载器的全文件预取+初始化触碰），存在挂机风险，本机放弃。机制上 server 也不会更好：cli 与 server 加载都会对 22GB 文件做 PrefetchVirtualMemory（llama_model.cpp init_mappings(true)），而命中率的主要搅动者a是加载期 fit 构图与各请求 prefill 的专家流量（实测每题 prefill 唯一专家页 1.1-11.8GB，层间路由集中度差异大），server 同样要做；server 仅省下 cli 每题一次的启动预取洪泛，收益是小头。要让本机能跑 server，需先给加载器加"跳过全文件预取"开关。
 
 ## 4. 生成质量抽查
 
