@@ -1,0 +1,26 @@
+[
+  {
+    "phase": "warmup1",
+    "decode_wall_s": 76.7,
+    "ssd_read_decode_mb": 3297.6
+  },
+  {
+    "phase": "warmup2",
+    "decode_wall_s": 94.7,
+    "ssd_read_decode_mb": 5315.4
+  },
+  {
+    "phase": "warm_same",
+    "decode_wall_s": 69.0,
+    "ssd_read_decode_mb": 3957.9,
+    "touched_expert_bytes_mb": 9648.8,
+    "dram_expert_hit_rate": 0.5898
+  },
+  {
+    "phase": "new_problem",
+    "decode_wall_s": 79.9,
+    "ssd_read_decode_mb": 1957.2,
+    "touched_expert_bytes_mb": 9648.8,
+    "dram_expert_hit_rate": 0.7972
+  }
+]

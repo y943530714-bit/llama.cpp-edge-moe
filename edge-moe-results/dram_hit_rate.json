@@ -1,0 +1,22 @@
+[
+  {
+    "config": "opt1_skip",
+    "decode_wall_s": 28.6,
+    "window_samples": 29,
+    "pages_input_total": 3065128,
+    "ssd_read_decode_mb": 11973.2,
+    "touched_expert_bytes_mb": 9648.8,
+    "dram_expert_hit_rate": 0.0,
+    "pages_all_total": 3178205
+  },
+  {
+    "config": "baseline",
+    "decode_wall_s": 100.2,
+    "window_samples": 0,
+    "pages_input_total": 0,
+    "ssd_read_decode_mb": 0.0,
+    "touched_expert_bytes_mb": 19297.5,
+    "dram_expert_hit_rate": 1.0,
+    "pages_all_total": 0
+  }
+]

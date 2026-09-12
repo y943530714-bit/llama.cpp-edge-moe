@@ -1,0 +1,61 @@
+routes: 32440 token-layer selections, stage=all
+kept ranks 0..3, skipped ranks 4..7
+
+coverage by window size (fraction of selections inside the per-layer hot window):
+  window   kept-ranks   skipped-ranks   all-ranks
+       8       0.3265          0.1935      0.2600
+      12       0.4086          0.2574      0.3330
+      16       0.4704          0.3153      0.3928
+      24       0.5660          0.4112      0.4886
+      32       0.6402          0.4870      0.5636
+      64       0.8245          0.6974      0.7609
+
+{
+  "trace": "edge-moe-results/traces_merged.jsonl",
+  "stage": "all",
+  "k1": 4,
+  "k_used": 8,
+  "k2": 16,
+  "skipped_rank_hits_at_k2": 0.3153,
+  "all_rank_hits_at_k2": 0.3928,
+  "skipped_selections_total": 129760,
+  "extra_experts_per_token_if_window_kept": 1.261,
+  "experts_seen_per_layer_min": 64,
+  "experts_seen_per_layer_max": 64,
+  "n_layers": 40,
+  "sweep": {
+    "8": {
+      "kept": 0.3265,
+      "skipped": 0.1935,
+      "all": 0.26
+    },
+    "12": {
+      "kept": 0.4086,
+      "skipped": 0.2574,
+      "all": 0.333
+    },
+    "16": {
+      "kept": 0.4704,
+      "skipped": 0.3153,
+      "all": 0.3928
+    },
+    "24": {
+      "kept": 0.566,
+      "skipped": 0.4112,
+      "all": 0.4886
+    },
+    "32": {
+      "kept": 0.6402,
+      "skipped": 0.487,
+      "all": 0.5636
+    },
+    "64": {
+      "kept": 0.8245,
+      "skipped": 0.6974,
+      "all": 0.7609
+    }
+  }
+}
+
+skipped-rank hit rate at window=16: 0.315 (extra compute if window members were computed: ~1.26 experts/token)
+interpretation: mixed - partial headroom depends on the quality cost of the cold half
