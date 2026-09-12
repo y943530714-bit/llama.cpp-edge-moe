@@ -72,6 +72,7 @@ def request_stream(prompt, n_predict=32, timeout=2400):
     payload = json.dumps({
         "prompt": prompt, "n_predict": n_predict, "temperature": 0.0,
         "top_k": 1, "cache_prompt": False, "stream": True,
+        "timings_per_token": True,
     }).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/completion", data=payload,
@@ -119,6 +120,7 @@ def main():
         "build-win/bin/Release/llama-server.exe",
         "-m", MODEL, "--ctx-size", "2048", "--no-warmup", "-t", "8",
         "--port", str(PORT), "--host", "127.0.0.1", "--parallel", "1",
+        "--no-prefetch", "-fit", "off", "--no-repack",
         "--moe-skip-k1", "4", "--moe-skip-k2", "16",
     ]
     log = open("edge-moe-results/server_warm.log", "wb")
@@ -194,8 +196,15 @@ def main():
             rows = list(csv.reader(f))
     except FileNotFoundError:
         rows = []
-    samples = [(t_counter_start - 3 + i, float(row[1]))
-               for i, row in enumerate(rows[1:]) if len(row) >= 2]
+    samples = []
+    for i, row in enumerate(rows[1:]):
+        if len(row) < 2:
+            continue
+        try:
+            v = float(row[1])
+        except ValueError:
+            continue
+        samples.append((t_counter_start - 3 + i, v))
     for row in results:
         if "decode_window" not in row:
             continue

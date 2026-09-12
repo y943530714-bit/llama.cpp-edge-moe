@@ -2706,6 +2706,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_MMAP"));
     add_opt(common_arg(
+        {"--prefetch"},
+        {"--no-prefetch"},
+        "prefetch the whole mapped model file into the OS cache at load (default: on). --no-prefetch reads pages on demand and avoids flooding the file cache",
+        [](common_params & params, bool value) {
+            params.no_prefetch = !value;
+        }
+    ));
+    add_opt(common_arg(
         {"-dio", "--direct-io"},
         {"-ndio", "--no-direct-io"},
         "DEPRECATED in favor of `--load-mode`: use DirectIO if available",

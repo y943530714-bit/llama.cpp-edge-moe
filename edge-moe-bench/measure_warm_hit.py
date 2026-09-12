@@ -40,10 +40,12 @@ def run_cli(prompt, log_path):
         "-p", prompt,
         "-n", str(N_PREDICT), "-t", "8", "--ctx-size", "2048",
         "--no-warmup", "--perf", "--verbose", "--temp", "0",
+        "--no-prefetch", "-fit", "off",
         "--moe-skip-k1", "4", "--moe-skip-k2", "16",
         "--single-turn", "--simple-io",
     ]
     log = open(log_path, "wb")
+    t_start = time.time()
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     set_ws_cap(proc.pid, int(6.5 * 1024 ** 3))
     decode_started = False
@@ -60,7 +62,7 @@ def run_cli(prompt, log_path):
         time.sleep(0.3)
     ret = proc.wait()
     log.close()
-    return ret, t_decode, time.time()
+    return ret, t_decode, time.time(), time.time() - t_start
 
 
 def main():
@@ -80,17 +82,18 @@ def main():
     ]
     results = []
     for name, prompt, log_path, measure in plan:
-        ret, t_decode, t_end = run_cli(prompt, log_path)
+        ret, t_decode, t_end, wall = run_cli(prompt, log_path)
         if ret != 0 or t_decode is None:
             print(f"{name}: FAILED (exit {ret})", file=sys.stderr)
             continue
-        row = {"phase": name, "exit": ret, "decode_wall_s": round(t_end - t_decode, 1)}
+        row = {"phase": name, "exit": ret, "decode_wall_s": round(t_end - t_decode, 1),
+               "load_wall_s": round(t_decode, 1), "wall_s": round(wall, 1)}
         if measure:
             row["decode_window"] = [t_decode, t_end]
             touched = (N_PREDICT - 1) * PER_TOKEN_EXPERT_BYTES
             row["touched_expert_bytes_mb"] = round(touched / 1024 / 1024, 1)
         results.append(row)
-        print(f"[{name}] decode_wall={row['decode_wall_s']}s", flush=True)
+        print(f"[{name}] load={row['load_wall_s']}s decode_wall={row['decode_wall_s']}s wall={row['wall_s']}s", flush=True)
 
     time.sleep(4)
     tp.terminate()
@@ -101,8 +104,15 @@ def main():
             rows = list(csv.reader(f))
     except FileNotFoundError:
         rows = []
-    samples = [(t_counter_start - 3 + i, float(row[1]))
-               for i, row in enumerate(rows[1:]) if len(row) >= 2]
+    samples = []
+    for i, row in enumerate(rows[1:]):
+        if len(row) < 2:
+            continue
+        try:
+            v = float(row[1])
+        except ValueError:
+            continue
+        samples.append((t_counter_start - 3 + i, v))
     for row in results:
         if "decode_window" not in row:
             continue
