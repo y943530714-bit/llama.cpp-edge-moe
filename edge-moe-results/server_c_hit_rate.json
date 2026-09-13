@@ -1,0 +1,98 @@
+[
+  {
+    "phase": "warmup",
+    "task_id": "HumanEval/0",
+    "wall_s": 29.2,
+    "decode_wall_s": 6.8,
+    "tpot_ms": 218.5,
+    "predicted_n": 32
+  },
+  {
+    "phase": "warmup",
+    "task_id": "HumanEval/5",
+    "wall_s": 22.2,
+    "decode_wall_s": 6.6,
+    "tpot_ms": 211.9,
+    "predicted_n": 32
+  },
+  {
+    "phase": "warm_same",
+    "task_id": "HumanEval/0",
+    "wall_s": 28.2,
+    "decode_wall_s": 7.6,
+    "tpot_ms": 245.7,
+    "predicted_n": 32,
+    "decode_window": [
+      1789266269.147862,
+      1789266276.756949
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 1860.3,
+    "dram_expert_hit_rate": 0.8072,
+    "window_samples": 7
+  },
+  {
+    "phase": "warm_same",
+    "task_id": "HumanEval/5",
+    "wall_s": 40.0,
+    "decode_wall_s": 22.5,
+    "tpot_ms": 724.5,
+    "predicted_n": 32,
+    "decode_window": [
+      1789266294.3410935,
+      1789266316.7924507
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 1029.4,
+    "dram_expert_hit_rate": 0.8933,
+    "window_samples": 22
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/10",
+    "wall_s": 125.6,
+    "decode_wall_s": 29.4,
+    "tpot_ms": 949.5,
+    "predicted_n": 32,
+    "decode_window": [
+      1789266412.9387338,
+      1789266442.3647668
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 1315.1,
+    "dram_expert_hit_rate": 0.8637,
+    "window_samples": 29
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/15",
+    "wall_s": 61.5,
+    "decode_wall_s": 15.9,
+    "tpot_ms": 835.8,
+    "predicted_n": 20,
+    "decode_window": [
+      1789266488.01487,
+      1789266503.8896463
+    ],
+    "touched_expert_bytes_mb": 5913.8,
+    "ssd_read_decode_mb": 808.0,
+    "dram_expert_hit_rate": 0.8634,
+    "window_samples": 15
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/20",
+    "wall_s": 117.4,
+    "decode_wall_s": 9.2,
+    "tpot_ms": 1145.6,
+    "predicted_n": 9,
+    "decode_window": [
+      1789266612.1505,
+      1789266621.3224213
+    ],
+    "touched_expert_bytes_mb": 2490.0,
+    "ssd_read_decode_mb": 0.0,
+    "dram_expert_hit_rate": 1.0,
+    "window_samples": 0
+  }
+]

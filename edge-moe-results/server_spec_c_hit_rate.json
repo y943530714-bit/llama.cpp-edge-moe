@@ -1,0 +1,112 @@
+[
+  {
+    "phase": "warmup",
+    "task_id": "HumanEval/0",
+    "wall_s": 133.3,
+    "decode_wall_s": 45.0,
+    "tpot_ms": 1449.8,
+    "predicted_n": 32,
+    "draft_n": 35,
+    "draft_n_accepted": 26
+  },
+  {
+    "phase": "warmup",
+    "task_id": "HumanEval/5",
+    "wall_s": 127.3,
+    "decode_wall_s": 48.6,
+    "tpot_ms": 1566.3,
+    "predicted_n": 32,
+    "draft_n": 33,
+    "draft_n_accepted": 26
+  },
+  {
+    "phase": "warm_same",
+    "task_id": "HumanEval/0",
+    "wall_s": 144.5,
+    "decode_wall_s": 43.2,
+    "tpot_ms": 1397.8,
+    "predicted_n": 32,
+    "draft_n": 35,
+    "draft_n_accepted": 26,
+    "decode_window": [
+      1789267022.2838008,
+      1789267065.5200906
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 2381.0,
+    "dram_expert_hit_rate": 0.7532,
+    "window_samples": 43
+  },
+  {
+    "phase": "warm_same",
+    "task_id": "HumanEval/5",
+    "wall_s": 113.9,
+    "decode_wall_s": 38.6,
+    "tpot_ms": 1244.2,
+    "predicted_n": 32,
+    "draft_n": 33,
+    "draft_n_accepted": 26,
+    "decode_window": [
+      1789267140.8163495,
+      1789267179.3937576
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 1662.1,
+    "dram_expert_hit_rate": 0.8277,
+    "window_samples": 38
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/10",
+    "wall_s": 154.5,
+    "decode_wall_s": 48.9,
+    "tpot_ms": 1576.8,
+    "predicted_n": 32,
+    "draft_n": 39,
+    "draft_n_accepted": 25,
+    "decode_window": [
+      1789267285.0655951,
+      1789267333.925071
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 1523.4,
+    "dram_expert_hit_rate": 0.8421,
+    "window_samples": 49
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/15",
+    "wall_s": 92.8,
+    "decode_wall_s": 30.3,
+    "tpot_ms": 1680.8,
+    "predicted_n": 19,
+    "draft_n": 28,
+    "draft_n_accepted": 14,
+    "decode_window": [
+      1789267396.4599257,
+      1789267426.7307503
+    ],
+    "touched_expert_bytes_mb": 5602.5,
+    "ssd_read_decode_mb": 2080.6,
+    "dram_expert_hit_rate": 0.6286,
+    "window_samples": 31
+  },
+  {
+    "phase": "new_problem",
+    "task_id": "HumanEval/20",
+    "wall_s": 162.7,
+    "decode_wall_s": 46.6,
+    "tpot_ms": 1504.8,
+    "predicted_n": 32,
+    "draft_n": 35,
+    "draft_n_accepted": 26,
+    "decode_window": [
+      1789267542.7999902,
+      1789267589.4240813
+    ],
+    "touched_expert_bytes_mb": 9648.8,
+    "ssd_read_decode_mb": 0.0,
+    "dram_expert_hit_rate": 1.0,
+    "window_samples": 0
+  }
+]
