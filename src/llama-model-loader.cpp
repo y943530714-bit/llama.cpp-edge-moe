@@ -1078,14 +1078,14 @@ ggml_backend_buffer_type_t llama_model_loader::lazy_read::buft() {
     return ggml_backend_dev_buffer_type(cpu_dev);
 }
 
-bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w) {
-    if (mode == LLAMA_LAZY_MODE_OFF) {
+bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w, bool force) {
+    if (!force && mode == LLAMA_LAZY_MODE_OFF) {
         return false;
     }
 
     // do not lazy-read small tensors, it has significant overhead and is not worth it
     constexpr size_t auto_min_size = 4ull * 1024 * 1024 * 1024;
-    if (mode != LLAMA_LAZY_MODE_ON && ggml_nbytes(t) <= auto_min_size) {
+    if (!force && mode != LLAMA_LAZY_MODE_ON && ggml_nbytes(t) <= auto_min_size) {
         return false;
     }
 
@@ -1098,9 +1098,12 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
     if (w) {
         ranges[w->idx].emplace_back(w->offs, w->offs + ggml_nbytes(t));
         tensors.insert(name);
+        n_bytes += ggml_nbytes(t);
 
-        LLAMA_LOG_INFO("%s: tensor %s (size = %zu MiB) lazy read enabled\n",
-                __func__, name.c_str(), ggml_nbytes(t)/1024/1024);
+        if (!force) {
+            LLAMA_LOG_INFO("%s: tensor %s (size = %zu MiB) lazy read enabled\n",
+                    __func__, name.c_str(), ggml_nbytes(t)/1024/1024);
+        }
     }
 
     return true;
@@ -1332,9 +1335,20 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
-    if (flags & TENSOR_READ_LAZY) {
+    const bool budgeted_moe_expert = lazy.budget_moe_experts && (
+        tn.tensor == LLM_TENSOR_FFN_DOWN_EXP ||
+        tn.tensor == LLM_TENSOR_FFN_GATE_EXP ||
+        tn.tensor == LLM_TENSOR_FFN_UP_EXP ||
+        tn.tensor == LLM_TENSOR_FFN_DOWN_EXPS ||
+        tn.tensor == LLM_TENSOR_FFN_GATE_EXPS ||
+        tn.tensor == LLM_TENSOR_FFN_UP_EXPS ||
+        tn.tensor == LLM_TENSOR_FFN_GATE_UP_EXPS ||
+        tn.tensor == LLM_TENSOR_FFN_DOWN_CHEXPS ||
+        tn.tensor == LLM_TENSOR_FFN_GATE_CHEXPS ||
+        tn.tensor == LLM_TENSOR_FFN_UP_CHEXPS);
+    if ((flags & TENSOR_READ_LAZY) || budgeted_moe_expert) {
         // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()), budgeted_moe_expert);
     }
 
     ggml_tensor t_meta = *cur;
@@ -1431,6 +1445,11 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             }
             mappings.emplace_back(std::move(mapping));
         }
+    }
+
+    if (lazy.budget_moe_experts && lazy.count() > 0) {
+        LLAMA_LOG_INFO("%s: excluded %zu routed expert tensors (%zu MiB) from startup prefetch and mlock\n",
+                __func__, lazy.count(), lazy.bytes()/1024/1024);
     }
 
     // compute the total size of all tensors for progress reporting

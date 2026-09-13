@@ -15,15 +15,38 @@ import time
 
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 QUOTA_LIMITS_HARDWS_MIN_DISABLE = 0x00000002
 QUOTA_LIMITS_HARDWS_MAX_ENABLE  = 0x00000004
+
+
+class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+def open_process(access, pid):
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    k32.OpenProcess.restype = ctypes.c_void_p
+    return k32.OpenProcess(access, False, pid)
 
 
 def set_hard_ws_cap(pid, cap_bytes):
     """Force a hard maximum working set so the process can never hold more
     resident memory than the edge device budget allows."""
     k32 = ctypes.windll.kernel32
-    h = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+    h = open_process(PROCESS_SET_QUOTA | PROCESS_TERMINATE, pid)
     if not h:
         return False
     try:
@@ -36,6 +59,16 @@ def set_hard_ws_cap(pid, cap_bytes):
         return bool(ok)
     finally:
         k32.CloseHandle(h)
+
+
+def get_working_set_bytes(handle):
+    if not handle:
+        return None
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(counters)
+    if not ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+        return None
+    return counters.WorkingSetSize
 
 
 class MEMORYSTATUSEX(ctypes.Structure):
@@ -85,7 +118,21 @@ def run_one(cli, model, prompt, args_extra, n_predict, threads, ctx, log_path, w
             if not ok:
                 proc.kill()
                 raise RuntimeError("failed to set the hard working set cap")
-        ret = proc.wait(timeout=3600)
+        query_handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, proc.pid)
+        peak_ws = 0
+        try:
+            while proc.poll() is None:
+                working_set = get_working_set_bytes(query_handle)
+                if working_set is not None:
+                    peak_ws = max(peak_ws, working_set)
+                if time.time() - t0 > 3600:
+                    proc.kill()
+                    raise RuntimeError("llama-cli timed out after 3600 seconds")
+                time.sleep(0.05)
+            ret = proc.returncode
+        finally:
+            if query_handle:
+                ctypes.windll.kernel32.CloseHandle(query_handle)
     wall = time.time() - t0
     if ret != 0:
         with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
@@ -106,7 +153,8 @@ def run_one(cli, model, prompt, args_extra, n_predict, threads, ctx, log_path, w
     return {
         "prompt_ms": prompt_ms, "prompt_n": prompt_n,
         "eval_ms": eval_ms, "eval_n": eval_n,
-        "tpot_ms": (eval_ms / eval_n) if eval_ms and eval_n else None,
+        "tpot_ms": (eval_ms / max(eval_n - 1, 1)) if eval_ms and eval_n else None,
+        "peak_ws_mib": round(peak_ws / (1024 ** 2), 1),
         "wall_s": round(wall, 1),
     }
 
@@ -171,12 +219,13 @@ def main():
                "prompt_n": r["prompt_n"], "prompt_ms": r["prompt_ms"],
                "eval_n": r["eval_n"], "eval_ms": r["eval_ms"],
                "tpot_ms": r["tpot_ms"], "wall_s": r["wall_s"],
+               "peak_ws_mib": r["peak_ws_mib"],
                "free_gb_before": round(free, 2)}
         rows.append(row)
         print(f"[{n + 1}/{len(picked)}] {prob['task_id']}: "
               f"prefill={r['prompt_ms']:.0f} ms ({r['prompt_n']} tok), "
               f"decode={r['eval_ms']:.0f} ms / {r['eval_n']} tok, "
-              f"tpot={r['tpot_ms']:.0f} ms, wall={r['wall_s']}s", flush=True)
+              f"tpot={r['tpot_ms']:.0f} ms, peak={r['peak_ws_mib']:.0f} MiB, wall={r['wall_s']}s", flush=True)
 
     # summary: pooled and per-problem
     tpots = [r["tpot_ms"] for r in rows if r["tpot_ms"]]

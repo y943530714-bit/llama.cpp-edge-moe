@@ -2129,7 +2129,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     const int64_t moe_k1 = cparams.moe_skip_k1;
     const int64_t moe_k2 = cparams.moe_skip_k2;
     const bool moe_skip = moe_k1 > 0 && moe_k1 < n_expert_used
-        && arch != LLM_ARCH_GROVEMOE && selected_experts->ne[0] == n_expert_used;
+        && gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX
+        && norm_w && exp_probs_b == nullptr && hparams.n_expert_groups <= 1
+        && selected_experts_in == nullptr && selected_experts->ne[0] == n_expert_used;
     const int64_t n_used_eff = moe_skip ? moe_k1 : n_expert_used;
 
     if (moe_skip) {
@@ -2147,6 +2149,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                 ggml_argsort_top_k(ctx0, probs2, k2c)); // [1, k2c, n_tokens]
         ggml_tensor * denom = ggml_sum_rows(ctx0,
                 ggml_reshape_2d(ctx0, topk2_vals, k2c, n_tokens)); // [1, n_tokens]
+        denom = ggml_clamp(ctx0, denom, 6.103515625e-5, INFINITY);
 
         w_eff = ggml_div(ctx0, w_eff, ggml_reshape_3d(ctx0, denom, 1, 1, n_tokens));
         cb(w_eff, "ffn_moe_weights_skip", il);

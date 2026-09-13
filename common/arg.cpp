@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <list>
+#include <limits>
 #include <numeric>
 #include <regex>
 #include <set>
@@ -887,6 +888,25 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
+
+    if (params.memory_budget > 0) {
+#if defined(_WIN32)
+        SYSTEM_INFO system_info;
+        GetSystemInfo(&system_info);
+        const SIZE_T min_working_set = 20ull * system_info.dwPageSize;
+        if (params.memory_budget < min_working_set) {
+            throw std::invalid_argument("error: --memory-budget is below the Windows minimum working set size");
+        }
+        if (!SetProcessWorkingSetSizeEx(GetCurrentProcess(), min_working_set, params.memory_budget,
+                    QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_ENABLE)) {
+            throw std::runtime_error(string_format("error: failed to apply --memory-budget: Windows error %lu",
+                    GetLastError()));
+        }
+        LOG_INF("memory budget: hard working set limit = %zu MiB\n", params.memory_budget/(1024*1024));
+#else
+        LOG_WRN("memory budget: hard resident limit is not available on this platform; applying budget-aware model loading only\n");
+#endif
+    }
 
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
@@ -2713,6 +2733,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.no_prefetch = !value;
         }
     ));
+    add_opt(common_arg(
+        {"--memory-budget"}, "MiB",
+        "maximum resident process memory in MiB; on Windows this sets a hard working set limit and keeps routed MoE experts out of startup prefetch",
+        [](common_params & params, const std::string & value) {
+            constexpr size_t mib = 1024*1024;
+            const unsigned long long value_mib = std::stoull(value);
+            if (value_mib == 0 || value_mib > std::numeric_limits<size_t>::max()/mib) {
+                throw std::invalid_argument("memory budget must be a positive number of MiB that fits in size_t");
+            }
+            params.memory_budget = static_cast<size_t>(value_mib)*mib;
+        }
+    ).set_env("LLAMA_ARG_MEMORY_BUDGET"));
     add_opt(common_arg(
         {"-dio", "--direct-io"},
         {"-ndio", "--no-direct-io"},

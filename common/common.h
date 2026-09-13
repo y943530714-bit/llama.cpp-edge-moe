@@ -493,6 +493,7 @@ struct common_params {
     enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
 
     bool no_prefetch = false; // do not prefetch the mapped model file into the OS cache
+    size_t memory_budget = 0; // maximum resident process memory in bytes; 0 = unlimited
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;

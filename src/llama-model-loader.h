@@ -89,10 +89,11 @@ struct llama_model_loader {
     struct lazy_read {
         // set by the caller before the create_tensor() calls
         enum llama_lazy_mode mode = LLAMA_LAZY_MODE_OFF;
+        bool budget_moe_experts = false;
 
         // decide whether this tensor is read lazily
         // pass w to also record it, or nullptr to only ask
-        bool add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w);
+        bool add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w, bool force = false);
 
         bool any() const {
             return !ranges.empty();
@@ -112,9 +113,18 @@ struct llama_model_loader {
         // lazy tensors are gathered on the host, so no offload setting applies to them
         static ggml_backend_buffer_type_t buft();
 
+        size_t bytes() const {
+            return n_bytes;
+        }
+
+        size_t count() const {
+            return tensors.size();
+        }
+
     private:
         std::map<uint32_t, llama_mmap::ranges> ranges;
         std::set<std::string>                  tensors;
+        size_t                                 n_bytes = 0;
     } lazy;
 
     llama_files files;
