@@ -19,7 +19,20 @@
 
 prefill（每题 78-176 token）：baseline 171-282s，opt1 94-175s，opt2/opt3 与 opt1 相当。prefill 阶段的专家并集覆盖几乎全部 256 个专家，因此跳过对 prefill 的收益有限；decode 阶段收益直接。
 
-## 2. 投机解码观察（opt2 vs opt3）
+## 2.1 三优化叠加实测（server 暖态，2026-09-13）
+
+在无洪泛的持久 server 上（`--no-repack --no-prefetch -fit off`，skip k1=4/k2=16）叠加 DFlash 投机（Q4_K_M 草稿、草稿长 7、relaxed verify），与纯 skip 的 server 数据对比：
+
+| 指标 | 纯 skip（server） | skip + DFlash + relaxed verify（server） |
+|---|---|---|
+| TPOT（5 请求中位） | **~1772 ms** | **~3065 ms（+73%）** |
+| DRAM 专家命中率 | 84-87% | **72-77%（下降）** |
+| 草稿接受率（relaxed） | - | 50-79%（draft_n_accepted/draft_n） |
+| decode 窗口 SSD 读 | ~46MB/token | ~73MB/token |
+
+结论：**暖态 85% 命中率下投机推理仍为净负**。机制：验证批（平均 ~3.5 草稿 + 1）的专家并集把每周期触碰字节放大 3-4 倍，命中率自身从 85% 被压到 72-77%，流式字节/token 反增 60%；relaxed verify 把接受率提到 74-79% 仍不足以摊销。投机转正的前提是专家缓存能容纳验证批并集（每层 ~16-20 常驻专家）+ 更高接受长度，即依赖 M4 的 arena/admission。当前预算下的最优组合是：**skip(k1=4,k2=16) 单独使用 + server 持久 + 去洪泛**（TPOT ~1.77s，命中率 85%）。
+
+## 2.2 投机解码观察（opt2 vs opt3，冷流式 cli）
 
 | 指标 | opt2（严格贪心验证） | opt3（relaxed verify） |
 |---|---|---|
