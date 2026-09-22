@@ -92,6 +92,7 @@ struct llama_cross {
 };
 
 struct llm_graph_params;
+class llama_edge_moe_arena;
 
 //
 // llm_graph_input
@@ -785,6 +786,7 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    llama_edge_moe_arena         * moe_arena;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1025,6 +1027,7 @@ struct llm_graph_context {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    llama_edge_moe_arena         * moe_arena;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 

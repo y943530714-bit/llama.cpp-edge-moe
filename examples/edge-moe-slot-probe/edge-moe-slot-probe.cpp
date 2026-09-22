@@ -1,10 +1,14 @@
 #include "edge_moe_layout.h"
 #include "edge_moe_resident_slots.h"
+#include "llama-edge-moe-io.h"
+#include "llama-model.h"
 
 #include "ggml-cpp.h"
 #include "gguf.h"
+#include "llama.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <cstdint>
@@ -25,6 +29,10 @@ struct options {
     edge_moe_tensor_part part = edge_moe_tensor_part::gate_up;
     uint32_t layer = 0;
     uint32_t slots = 0;
+    size_t resident_budget_mib = 0;
+    size_t io_depth = 32;
+    bool coalesced = false;
+    bool direct_io = false;
     bool self_test = false;
     bool show_help = false;
 };
@@ -112,6 +120,10 @@ void print_usage(const char * program) {
         "  --part NAME           gate, up, gate_up, or down (default: gate_up)\n"
         "  --experts LIST        comma-separated logical expert IDs (default: 0)\n"
         "  --slots N             number of resident slots (default: expert count)\n"
+        "  --direct-io           read and byte-compare with Windows unbuffered I/O\n"
+        "  --io-depth N          maximum unbuffered reads in flight (default: 32)\n"
+        "  --coalesced           combine contiguous expert ranges into one full-layer read\n"
+        "  --resident-budget-mib N  load the model and pin non-expert weights under this process budget\n"
         "  --self-test           test remapping with ggml_mul_mat_id on CPU\n"
         "  --help                show this help\n",
         program, program);
@@ -129,9 +141,17 @@ bool parse_options(int argc, char ** argv, options & params) {
             params.self_test = true;
             continue;
         }
+        if (arg == "--direct-io") {
+            params.direct_io = true;
+            continue;
+        }
+        if (arg == "--coalesced") {
+            params.coalesced = true;
+            continue;
+        }
 
         if (arg == "--model" || arg == "--split" || arg == "--layer" || arg == "--part" ||
-            arg == "--experts" || arg == "--slots") {
+            arg == "--experts" || arg == "--slots" || arg == "--resident-budget-mib" || arg == "--io-depth") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "%s requires a value\n", arg.c_str());
                 return false;
@@ -156,6 +176,18 @@ bool parse_options(int argc, char ** argv, options & params) {
                     return false;
                 } else if (arg == "--layer") {
                     params.layer = static_cast<uint32_t>(parsed);
+                } else if (arg == "--resident-budget-mib") {
+                    if (parsed > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
+                        std::fprintf(stderr, "resident budget is too large: %s\n", value.c_str());
+                        return false;
+                    }
+                    params.resident_budget_mib = static_cast<size_t>(parsed);
+                } else if (arg == "--io-depth") {
+                    if (parsed == 0) {
+                        std::fprintf(stderr, "--io-depth must be positive\n");
+                        return false;
+                    }
+                    params.io_depth = static_cast<size_t>(parsed);
                 } else {
                     params.slots = static_cast<uint32_t>(parsed);
                 }
@@ -184,7 +216,7 @@ bool parse_options(int argc, char ** argv, options & params) {
     return true;
 }
 
-bool read_range(const std::string & path, const edge_moe_expert_file_range & range, std::vector<uint8_t> & data) {
+bool read_range_cached(const std::string & path, const edge_moe_expert_file_range & range, std::vector<uint8_t> & data) {
     if (range.size > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) ||
         range.offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max())) {
         return false;
@@ -391,6 +423,18 @@ bool run_backend_self_test() {
 
 bool run_model_probe(const options & params) {
     std::vector<model_layout> candidates;
+    std::unique_ptr<llama_edge_moe_reader> direct_reader;
+    if (params.direct_io) {
+        try {
+            direct_reader = std::make_unique<llama_edge_moe_reader>(params.files, params.io_depth);
+        } catch (const std::exception & exception) {
+            std::fprintf(stderr, "failed to initialize unbuffered reader: %s\n", exception.what());
+            return false;
+        }
+        for (uint32_t i = 0; i < direct_reader->file_count(); ++i) {
+            std::printf("direct_io_file[%u]: alignment=%zu\n", i, direct_reader->file_alignment(i));
+        }
+    }
 
     for (uint32_t file_idx = 0; file_idx < params.files.size(); ++file_idx) {
         const std::string & path = params.files[file_idx];
@@ -418,7 +462,10 @@ bool run_model_probe(const options & params) {
             }
             const std::string name(tensor_name);
             const edge_moe_tensor_part actual_part = edge_moe_tensor_part_from_name(name);
-            const bool matches_part = params.part == edge_moe_tensor_part::gate_up
+            const bool matches_part = params.coalesced && params.part == edge_moe_tensor_part::gate_up
+                ? actual_part == edge_moe_tensor_part::gate_up || actual_part == edge_moe_tensor_part::gate ||
+                    actual_part == edge_moe_tensor_part::up || actual_part == edge_moe_tensor_part::down
+                : params.part == edge_moe_tensor_part::gate_up
                 ? actual_part == edge_moe_tensor_part::gate_up ||
                     actual_part == edge_moe_tensor_part::gate ||
                     actual_part == edge_moe_tensor_part::up
@@ -508,6 +555,41 @@ bool run_model_probe(const options & params) {
         selected.push_back(&*found);
     }
 
+    if (direct_reader && params.coalesced && params.part == edge_moe_tensor_part::gate_up) {
+        const auto down = std::find_if(candidates.begin(), candidates.end(), [](const model_layout & candidate) {
+            return candidate.layout.part == edge_moe_tensor_part::down;
+        });
+        if (down == candidates.end()) {
+            std::fprintf(stderr, "full-layer benchmark requires the down tensor\n");
+            return false;
+        }
+        std::vector<const model_layout *> full_layer = selected;
+        full_layer.push_back(&*down);
+        std::vector<std::vector<uint8_t>> buffers(full_layer.size());
+        std::vector<llama_edge_moe_io_request> requests;
+        size_t total_bytes = 0;
+        for (size_t i = 0; i < full_layer.size(); ++i) {
+            const edge_moe_expert_layout & layout = full_layer[i]->layout;
+            const edge_moe_expert_file_range & first = layout.ranges.front();
+            const edge_moe_expert_file_range & last = layout.ranges.back();
+            const size_t bytes = last.offset + last.size - first.offset;
+            buffers[i].resize(bytes);
+            requests.push_back({first.file_idx, first.offset, bytes, buffers[i].data()});
+            total_bytes += bytes;
+        }
+        std::string error;
+        const auto begin = std::chrono::steady_clock::now();
+        if (!direct_reader->read_many(requests, error)) {
+            std::fprintf(stderr, "coalesced full-layer read failed: %s\n", error.c_str());
+            return false;
+        }
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - begin).count();
+        std::printf("direct_io_full_layer: requests=%zu bytes=%zu elapsed_ms=%.3f throughput_mib_s=%.2f\n",
+            requests.size(), total_bytes, elapsed_ms,
+            elapsed_ms > 0.0 ? total_bytes / 1024.0 / 1024.0 * 1000.0 / elapsed_ms : 0.0);
+    }
+
     uint32_t slot_count = params.slots == 0 ? static_cast<uint32_t>(params.experts.size()) : params.slots;
     if (slot_count == 0) {
         std::fprintf(stderr, "slot count must be greater than zero\n");
@@ -522,18 +604,95 @@ bool run_model_probe(const options & params) {
             layout.tensor.name.c_str(), params.layer, edge_moe_tensor_part_name(layout.part),
             layout.expert_count, slot_count, layout.expert_stride);
 
+        std::vector<std::vector<uint8_t>> direct_data(params.experts.size());
+        if (direct_reader) {
+            std::vector<std::vector<uint8_t>> cached_data(params.experts.size());
+            std::vector<llama_edge_moe_io_request> requests;
+            requests.reserve(params.coalesced ? 1 : params.experts.size());
+            size_t coalesced_size = 0;
+            for (size_t i = 0; i < params.experts.size(); ++i) {
+                const uint32_t expert = params.experts[i];
+                if (expert >= layout.expert_count) {
+                    std::fprintf(stderr, "expert %u is outside [0, %u)\n", expert, layout.expert_count);
+                    return false;
+                }
+                const edge_moe_expert_file_range & range = layout.ranges[expert];
+                if (!read_range_cached(source->path, range, cached_data[i])) {
+                    std::fprintf(stderr, "expert %u: cached reference read failed\n", expert);
+                    return false;
+                }
+                if (params.coalesced) {
+                    if (i > 0) {
+                        const edge_moe_expert_file_range & previous = layout.ranges[params.experts[i - 1]];
+                        if (range.file_idx != previous.file_idx || range.offset != previous.offset + previous.size) {
+                            std::fprintf(stderr, "--coalesced requires contiguous experts in file order\n");
+                            return false;
+                        }
+                    }
+                    coalesced_size += range.size;
+                } else {
+                    direct_data[i].resize(range.size);
+                    requests.push_back({range.file_idx, range.offset, range.size, direct_data[i].data()});
+                }
+            }
+            if (params.coalesced) {
+                direct_data[0].resize(coalesced_size);
+                const edge_moe_expert_file_range & first = layout.ranges[params.experts.front()];
+                requests.push_back({first.file_idx, first.offset, coalesced_size, direct_data[0].data()});
+            }
+
+            std::string error;
+            const auto direct_begin = std::chrono::steady_clock::now();
+            if (!direct_reader->read_many(requests, error)) {
+                std::fprintf(stderr, "batched unbuffered read failed: %s\n", error.c_str());
+                return false;
+            }
+            const double direct_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - direct_begin).count();
+            size_t direct_bytes = 0;
+            for (const llama_edge_moe_io_request & request : requests) {
+                direct_bytes += request.size;
+            }
+            std::printf("direct_io_batch: part=%s requests=%zu bytes=%zu elapsed_ms=%.3f throughput_mib_s=%.2f\n",
+                edge_moe_tensor_part_name(layout.part), requests.size(), direct_bytes, direct_ms,
+                direct_ms > 0.0 ? direct_bytes / 1024.0 / 1024.0 * 1000.0 / direct_ms : 0.0);
+            size_t direct_offset = 0;
+            for (size_t i = 0; i < cached_data.size(); ++i) {
+                const bool matches = params.coalesced
+                    ? std::memcmp(direct_data[0].data() + direct_offset, cached_data[i].data(), cached_data[i].size()) == 0
+                    : direct_data[i] == cached_data[i];
+                if (!matches) {
+                    std::fprintf(stderr, "expert %u: unbuffered data differs from the cached reference\n", params.experts[i]);
+                    return false;
+                }
+                direct_offset += cached_data[i].size();
+            }
+        }
+
         size_t loaded = 0;
-        for (const uint32_t expert : params.experts) {
+        for (size_t i = 0; i < params.experts.size(); ++i) {
+            const uint32_t expert = params.experts[i];
             if (expert >= layout.expert_count) {
                 std::fprintf(stderr, "expert %u is outside [0, %u)\n", expert, layout.expert_count);
                 return false;
             }
             std::vector<uint8_t> data;
-            if (!read_range(source->path, layout.ranges[expert], data)) {
+            if (direct_reader && params.coalesced) {
+                const edge_moe_expert_file_range & range = layout.ranges[expert];
+                data.resize(range.size);
+                size_t offset = 0;
+                for (size_t j = 0; j < i; ++j) {
+                    offset += layout.ranges[params.experts[j]].size;
+                }
+                std::memcpy(data.data(), direct_data[0].data() + offset, range.size);
+            } else if (direct_reader) {
+                data = std::move(direct_data[i]);
+            }
+            std::string error;
+            if (!direct_reader && !read_range_cached(source->path, layout.ranges[expert], data)) {
                 std::fprintf(stderr, "expert %u: failed to read source range\n", expert);
                 return false;
             }
-            std::string error;
             if (!slots.load_blocking(expert, data.data(), data.size(), loaded, error)) {
                 std::fprintf(stderr, "expert %u: blocking load failed: %s\n", expert, error.c_str());
                 return false;
@@ -559,7 +718,104 @@ bool run_model_probe(const options & params) {
         std::printf("combined_summary: tensors=%zu loaded=%zu slots_per_tensor=%u errors=0\n",
             selected.size(), total_loaded, slot_count);
     }
+    if (direct_reader) {
+        const llama_edge_moe_io_stats & stats = direct_reader->stats();
+        std::printf("direct_io_summary: requests=%llu requested_bytes=%llu transferred_bytes=%llu peak_bounce_bytes=%zu compare=ok\n",
+            static_cast<unsigned long long>(stats.requests),
+            static_cast<unsigned long long>(stats.bytes_requested),
+            static_cast<unsigned long long>(stats.bytes_transferred),
+            stats.peak_bounce_bytes);
+    }
     return true;
+}
+
+bool run_residency_probe(const options & params) {
+    if (params.resident_budget_mib == 0) {
+        return true;
+    }
+
+    llama_backend_init();
+    llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = 0;
+    model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
+    model_params.no_prefetch = true;
+    model_params.use_extra_bufts = false;
+
+    std::vector<const char *> paths;
+    paths.reserve(params.files.size());
+    for (const std::string & path : params.files) {
+        paths.push_back(path.c_str());
+    }
+
+    llama_model * model = paths.size() == 1
+        ? llama_model_load_from_file(paths[0], model_params)
+        : llama_model_load_from_splits(paths.data(), paths.size(), model_params);
+    if (model == nullptr) {
+        std::fprintf(stderr, "residency probe: failed to load model\n");
+        llama_backend_free();
+        return false;
+    }
+
+    bool ok = true;
+    if (model->edge_moe_source_count() == 0) {
+        std::fprintf(stderr, "residency probe: no expert source descriptors were persisted\n");
+        ok = false;
+    }
+
+    size_t main_source_count = 0;
+    for (const llama_layer & layer : model->layers) {
+        const std::array<const ggml_tensor *, 4> tensors = {
+            layer.ffn_gate_exps,
+            layer.ffn_up_exps,
+            layer.ffn_gate_up_exps,
+            layer.ffn_down_exps,
+        };
+        for (const ggml_tensor * tensor : tensors) {
+            if (tensor == nullptr) {
+                continue;
+            }
+            const llama_edge_moe_source * source = model->edge_moe_source(tensor);
+            if (source == nullptr || source->path.empty() || source->size != ggml_nbytes(tensor)) {
+                std::fprintf(stderr, "residency probe: invalid source descriptor for %s\n", tensor->name);
+                ok = false;
+                break;
+            }
+            ++main_source_count;
+        }
+    }
+
+    llama_edge_moe_process_memory before = {};
+    llama_edge_moe_process_memory after = {};
+    std::string error;
+    if (ok && !llama_edge_moe_get_process_memory(before, error)) {
+        std::fprintf(stderr, "residency probe: %s\n", error.c_str());
+        ok = false;
+    }
+
+    size_t locked_bytes = 0;
+    const size_t budget_bytes = params.resident_budget_mib * 1024 * 1024;
+    if (ok && !model->edge_moe_lock_non_expert_weights(budget_bytes, locked_bytes, error)) {
+        std::fprintf(stderr, "residency probe: %s\n", error.c_str());
+        ok = false;
+    }
+    if (ok && !llama_edge_moe_get_process_memory(after, error)) {
+        std::fprintf(stderr, "residency probe: %s\n", error.c_str());
+        ok = false;
+    }
+    if (ok) {
+        std::printf("residency_summary: budget_mib=%zu expert_sources=%zu main_sources=%zu locked_mib=%.2f working_set_before_mib=%.2f working_set_after_mib=%.2f private_after_mib=%.2f\n",
+            params.resident_budget_mib,
+            model->edge_moe_source_count(),
+            main_source_count,
+            locked_bytes / 1024.0 / 1024.0,
+            before.working_set_bytes / 1024.0 / 1024.0,
+            after.working_set_bytes / 1024.0 / 1024.0,
+            after.private_bytes / 1024.0 / 1024.0);
+    }
+
+    llama_model_free(model);
+    llama_backend_free();
+    return ok;
 }
 
 } // namespace
@@ -575,5 +831,8 @@ int main(int argc, char ** argv) {
     if (params.self_test) {
         return run_backend_self_test() ? 0 : 1;
     }
-    return run_model_probe(params) ? 0 : 1;
+    if (!run_model_probe(params)) {
+        return 1;
+    }
+    return run_residency_probe(params) ? 0 : 1;
 }

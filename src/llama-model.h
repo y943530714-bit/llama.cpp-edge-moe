@@ -604,6 +604,13 @@ struct llama_meta_device_get_split_state_userdata {
     const struct llama_model * model;
 };
 
+struct llama_edge_moe_source {
+    std::string path;
+    uint32_t file_index = 0;
+    size_t offset = 0;
+    size_t size = 0;
+};
+
 struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata);
 
 struct llama_model {
@@ -745,6 +752,10 @@ struct llama_model {
     bool has_tensor_overrides() const;
 
     const struct ggml_tensor * get_tensor(const char * name) const;
+
+    LLAMA_API const llama_edge_moe_source * edge_moe_source(const struct ggml_tensor * tensor) const;
+    LLAMA_API size_t edge_moe_source_count() const;
+    LLAMA_API bool edge_moe_lock_non_expert_weights(size_t process_budget_bytes, size_t & locked_bytes, std::string & error) const;
 
     float get_rope_freq_base (const llama_cparams & cparams, int il) const;
     float get_rope_freq_scale(const llama_cparams & cparams, int il) const;

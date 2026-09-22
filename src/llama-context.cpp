@@ -1,5 +1,8 @@
 #include "llama-context.h"
 
+#include "llama-edge-moe-arena.h"
+#include "llama-edge-moe-io.h"
+
 #include "ggml.h"
 #include "llama-arch.h"
 #include "llama-graph.h"
@@ -78,6 +81,24 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
     /*.op               =*/ LLM_FUSED_OP_DSV4_HC_POST,
     /*.name             =*/ "fused DeepSeek V4 HC post",
     /*.n_tokens_per_seq =*/ 1,
+};
+
+class llama_edge_moe_batch_guard {
+public:
+    llama_edge_moe_batch_guard(llama_edge_moe_arena * arena, const bool prefill) : arena(arena) {
+        if (arena != nullptr) {
+            arena->begin_batch(prefill);
+        }
+    }
+
+    ~llama_edge_moe_batch_guard() {
+        if (arena != nullptr) {
+            arena->end_batch();
+        }
+    }
+
+private:
+    llama_edge_moe_arena * arena;
 };
 
 llama_context::llama_context(
@@ -274,10 +295,38 @@ llama_context::llama_context(
 
     cparams.moe_skip_k1 = params.moe_skip_k1;
     cparams.moe_skip_k2 = params.moe_skip_k2;
+    cparams.moe_arena_bytes = params.moe_arena_bytes;
+    cparams.moe_streaming_budget_bytes = params.moe_streaming_budget_bytes;
+    cparams.moe_streaming_reserve_bytes = params.moe_streaming_reserve_bytes;
+    cparams.moe_streaming_io_depth = params.moe_streaming_io_depth;
+    cparams.moe_streaming_layered_cache = params.moe_streaming_layered_cache;
+    cparams.moe_streaming_prefill_full_layer = params.moe_streaming_prefill_full_layer;
+    cparams.moe_streaming_decode_prefetch = params.moe_streaming_decode_prefetch;
+    cparams.moe_streaming_hot_slots_per_layer = params.moe_streaming_hot_slots_per_layer;
+    if (params.moe_streaming_hot_slots_by_layer_count != 0) {
+        if (params.moe_streaming_hot_slots_by_layer == nullptr) {
+            throw std::runtime_error("edge MoE per-layer hot quota pointer is null");
+        }
+        cparams.moe_streaming_hot_slots_by_layer.assign(
+            params.moe_streaming_hot_slots_by_layer,
+            params.moe_streaming_hot_slots_by_layer + params.moe_streaming_hot_slots_by_layer_count);
+    }
+    if (!cparams.moe_streaming_hot_slots_by_layer.empty() && cparams.moe_streaming_hot_slots_per_layer != 0) {
+        throw std::runtime_error("edge MoE scalar and per-layer hot quotas are mutually exclusive");
+    }
+    if (!cparams.moe_streaming_hot_slots_by_layer.empty() && !cparams.moe_streaming_layered_cache) {
+        throw std::runtime_error("edge MoE per-layer hot quotas require layered cache");
+    }
     if (cparams.moe_skip_k1 < 0 || cparams.moe_skip_k2 < 0 ||
             (cparams.moe_skip_k1 > 0 && cparams.moe_skip_k2 > 0 && cparams.moe_skip_k2 < cparams.moe_skip_k1)) {
         throw std::runtime_error("invalid moe_skip k1=" + std::to_string(cparams.moe_skip_k1)
             + " k2=" + std::to_string(cparams.moe_skip_k2) + " (need 0 <= k1 <= k2)");
+    }
+    if (cparams.moe_arena_bytes > 0 && cparams.moe_streaming_budget_bytes > 0) {
+        throw std::runtime_error("edge MoE fixed arena and process-budget streaming are mutually exclusive");
+    }
+    if ((cparams.moe_arena_bytes > 0 || cparams.moe_streaming_budget_bytes > 0) && cparams.n_seq_max != 1) {
+        throw std::runtime_error("edge MoE expert caching requires n_seq_max=1");
     }
 
     // initialized later
@@ -462,6 +511,40 @@ llama_context::llama_context(
 
         cparams.pipeline_parallel = pipeline_parallel;
 
+        if (cparams.moe_arena_bytes > 0) {
+            moe_arena = std::make_unique<llama_edge_moe_arena>(model, backend_cpu, cparams.moe_arena_bytes);
+        } else if (cparams.moe_streaming_budget_bytes > 0) {
+            size_t locked_bytes = 0;
+            std::string memory_error;
+            if (!model.edge_moe_lock_non_expert_weights(
+                        cparams.moe_streaming_budget_bytes, locked_bytes, memory_error)) {
+                throw std::runtime_error("failed to make non-expert weights resident: " + memory_error);
+            }
+
+            llama_edge_moe_process_memory memory;
+            if (!llama_edge_moe_get_process_memory(memory, memory_error)) {
+                throw std::runtime_error("failed to size the expert slot cache: " + memory_error);
+            }
+            if (memory.working_set_bytes > cparams.moe_streaming_budget_bytes ||
+                    cparams.moe_streaming_reserve_bytes > cparams.moe_streaming_budget_bytes - memory.working_set_bytes) {
+                throw std::runtime_error("process memory budget cannot hold the resident target weights and runtime reserve");
+            }
+            const size_t arena_budget = cparams.moe_streaming_budget_bytes -
+                memory.working_set_bytes - cparams.moe_streaming_reserve_bytes;
+            LLAMA_LOG_INFO("%s: streaming budget = %.2f MiB, working set = %.2f MiB, locked non-expert = %.2f MiB, reserve = %.2f MiB, expert slots <= %.2f MiB\n",
+                    __func__,
+                    cparams.moe_streaming_budget_bytes / 1024.0 / 1024.0,
+                    memory.working_set_bytes / 1024.0 / 1024.0,
+                    locked_bytes / 1024.0 / 1024.0,
+                    cparams.moe_streaming_reserve_bytes / 1024.0 / 1024.0,
+                    arena_budget / 1024.0 / 1024.0);
+            moe_arena = std::make_unique<llama_edge_moe_arena>(
+                model, backend_cpu, arena_budget, true, cparams.moe_streaming_io_depth,
+                cparams.moe_streaming_layered_cache, cparams.moe_streaming_prefill_full_layer,
+                cparams.moe_streaming_decode_prefetch, cparams.moe_streaming_hot_slots_per_layer,
+                cparams.moe_streaming_hot_slots_by_layer);
+        }
+
         if (cparams.pipeline_parallel) {
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
         }
@@ -489,6 +572,21 @@ llama_context::llama_context(
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+
+    if (cparams.moe_streaming_budget_bytes > 0) {
+        llama_edge_moe_process_memory memory;
+        std::string memory_error;
+        if (llama_edge_moe_get_process_memory(memory, memory_error)) {
+            LLAMA_LOG_INFO("%s: streaming working set = %.2f MiB, peak = %.2f MiB, private = %.2f MiB, target = %.2f MiB\n",
+                    __func__,
+                    memory.working_set_bytes / 1024.0 / 1024.0,
+                    memory.peak_working_set_bytes / 1024.0 / 1024.0,
+                    memory.private_bytes / 1024.0 / 1024.0,
+                    cparams.moe_streaming_budget_bytes / 1024.0 / 1024.0);
+        } else {
+            LLAMA_LOG_WARN("%s: failed to query final streaming memory use: %s\n", __func__, memory_error.c_str());
+        }
+    }
 
     // when training, ggml_opt allocates extra buffers through the scheduler, so the sizes no longer match the expectation
     if (!model.hparams.no_alloc && !opt_ctx) {
@@ -1368,7 +1466,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+        if (moe_arena || cparams.cb_eval) {
+            ggml_backend_sched_set_eval_callback(sched.get(), eval_callback, this);
+        } else {
+            ggml_backend_sched_set_eval_callback(sched.get(), nullptr, nullptr);
+        }
 
         //const auto t_start_us = ggml_time_us();
 
@@ -1717,6 +1819,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     const uint32_t n_tokens_all  = balloc->get_n_tokens();
     const uint32_t n_outputs_all = balloc->get_n_outputs();
+
+    // Prompt ingestion normally requests fewer outputs than input tokens,
+    // while speculative verification requests an output for every candidate.
+    const bool moe_prefill = n_tokens_all > 1 && n_outputs_all < n_tokens_all;
+    llama_edge_moe_batch_guard moe_batch(moe_arena.get(), moe_prefill);
 
     if (output_all) {
         // require that all tokens are output
@@ -2490,6 +2597,7 @@ llm_graph_params llama_context::graph_params(
         /*.loras       =*/ loras.get(),
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
+        /*.moe_arena   =*/ moe_arena.get(),
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
@@ -2516,7 +2624,14 @@ ggml_status llama_context::graph_compute(
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
     }
 
+    if (moe_arena) {
+        moe_arena->begin_compute();
+    }
+
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
+    if (status == GGML_STATUS_SUCCESS && moe_arena && moe_arena->failed()) {
+        status = GGML_STATUS_FAILED;
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }
@@ -2524,6 +2639,26 @@ ggml_status llama_context::graph_compute(
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
 
     return status;
+}
+
+bool llama_context::eval_callback(ggml_tensor * tensor, const bool ask, void * user_data) {
+    auto * ctx = static_cast<llama_context *>(user_data);
+    const bool arena_need = ctx->moe_arena && ctx->moe_arena->callback(tensor, true);
+    const bool user_need = ctx->cparams.cb_eval &&
+        ctx->cparams.cb_eval(tensor, true, ctx->cparams.cb_eval_user_data);
+
+    if (ask) {
+        return arena_need || user_need;
+    }
+
+    bool keep_going = true;
+    if (arena_need) {
+        keep_going = ctx->moe_arena->callback(tensor, false);
+    }
+    if (user_need) {
+        keep_going = ctx->cparams.cb_eval(tensor, false, ctx->cparams.cb_eval_user_data) && keep_going;
+    }
+    return keep_going;
 }
 
 llm_graph_cb llama_context::graph_get_cb() const {
@@ -3374,6 +3509,9 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
             ret[buft].context += size;
         }
     }
+    if (moe_arena) {
+        ret[ggml_backend_get_default_buffer_type(backend_cpu)].context += moe_arena->size_bytes();
+    }
     if (model.hparams.no_alloc) {
         for (size_t i = 0; i < backends.size(); ++i) {
             ggml_backend_t             backend = backends[i].get();
@@ -3661,6 +3799,16 @@ llama_context_params llama_context_default_params() {
         /*.n_sampler                   =*/ 0,
         /*.moe_skip_k1                 =*/ 0,
         /*.moe_skip_k2                 =*/ 0,
+        /*.moe_arena_bytes             =*/ 0,
+        /*.moe_streaming_budget_bytes  =*/ 0,
+        /*.moe_streaming_reserve_bytes =*/ 0,
+        /*.moe_streaming_io_depth      =*/ 8,
+        /*.moe_streaming_layered_cache =*/ false,
+        /*.moe_streaming_prefill_full_layer =*/ false,
+        /*.moe_streaming_decode_prefetch =*/ false,
+        /*.moe_streaming_hot_slots_per_layer =*/ 0,
+        /*.moe_streaming_hot_slots_by_layer =*/ nullptr,
+        /*.moe_streaming_hot_slots_by_layer_count =*/ 0,
         /*.ctx_other                   =*/ nullptr,
     };
 

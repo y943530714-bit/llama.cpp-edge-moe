@@ -419,6 +419,18 @@ extern "C" {
         // (0 = disabled for both)
         int32_t moe_skip_k1;
         int32_t moe_skip_k2;
+        size_t  moe_arena_bytes;
+        // Total process working-set target for selective non-expert residency and unbuffered expert streaming.
+        // The reserve is subtracted before sizing expert slots. Both values are zero when streaming is disabled.
+        size_t  moe_streaming_budget_bytes;
+        size_t  moe_streaming_reserve_bytes;
+        uint32_t moe_streaming_io_depth;
+        bool     moe_streaming_layered_cache;
+        bool     moe_streaming_prefill_full_layer;
+        bool     moe_streaming_decode_prefetch;
+        uint32_t moe_streaming_hot_slots_per_layer;
+        const uint32_t * moe_streaming_hot_slots_by_layer;
+        size_t           moe_streaming_hot_slots_by_layer_count;
 
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts

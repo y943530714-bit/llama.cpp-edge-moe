@@ -17,6 +17,10 @@ add_library(llama
             llama-chat.cpp
             llama-context.cpp
             llama-cparams.cpp
+            llama-edge-moe-arena.cpp
+            llama-edge-moe-arena.h
+            llama-edge-moe-io.cpp
+            llama-edge-moe-io.h
             llama-grammar.cpp
             llama-graph.cpp
             llama-hparams.cpp

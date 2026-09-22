@@ -6,6 +6,7 @@
 #include "llama-impl.h"
 #include "llama-mmap.h"
 #include "llama-cparams.h"
+#include "llama-edge-moe-io.h"
 #include "llama-model-loader.h"
 
 #include "llama-kv-cache.h"
@@ -1175,6 +1176,9 @@ struct llama_model::impl {
     bool has_tensor_overrides;
 
     std::vector<float> tensor_split_owned;
+
+    std::unordered_map<const ggml_tensor *, llama_edge_moe_source> edge_moe_sources;
+    std::unique_ptr<llama_edge_moe_resident_set> edge_moe_resident;
 };
 
 llama_model::llama_model(const llama_model_params & params) : params(params), pimpl(std::make_unique<impl>()) {
@@ -1686,6 +1690,24 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     for (auto & [_, ctx_ptr] : ml.ctx_map) {
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
+        }
+    }
+
+    if (!ml.files.empty()) {
+        for (const auto & item : tensors_by_name) {
+            if (item.first.find("_exps.") == std::string::npos) {
+                continue;
+            }
+            const llama_model_loader::llama_tensor_weight * weight = ml.get_weight(item.first.c_str());
+            if (weight == nullptr) {
+                throw std::runtime_error(format("missing source metadata for routed expert tensor '%s'", item.first.c_str()));
+            }
+            pimpl->edge_moe_sources.emplace(item.second, llama_edge_moe_source {
+                ml.file_path(weight->idx),
+                weight->idx,
+                weight->offs,
+                ggml_nbytes(item.second),
+            });
         }
     }
 
@@ -2204,6 +2226,51 @@ const ggml_tensor * llama_model::get_tensor(const char * name) const {
     }
 
     return it->second;
+}
+
+const llama_edge_moe_source * llama_model::edge_moe_source(const ggml_tensor * tensor) const {
+    const auto found = pimpl->edge_moe_sources.find(tensor);
+    return found == pimpl->edge_moe_sources.end() ? nullptr : &found->second;
+}
+
+size_t llama_model::edge_moe_source_count() const {
+    return pimpl->edge_moe_sources.size();
+}
+
+bool llama_model::edge_moe_lock_non_expert_weights(
+        const size_t process_budget_bytes,
+        size_t & locked_bytes,
+        std::string & error) const {
+    locked_bytes = 0;
+    error.clear();
+    if (pimpl->edge_moe_sources.empty()) {
+        error = "model has no persisted routed expert sources";
+        return false;
+    }
+    if (pimpl->edge_moe_resident) {
+        locked_bytes = pimpl->edge_moe_resident->size_bytes();
+        return true;
+    }
+
+    std::vector<std::pair<void *, size_t>> ranges;
+    for (const auto & ctx_bufs : pimpl->ctxs_bufs) {
+        ggml_context * ctx = ctx_bufs.first.get();
+        for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor != nullptr; tensor = ggml_get_next_tensor(ctx, tensor)) {
+            if (pimpl->edge_moe_sources.count(tensor) != 0 || tensor->data == nullptr || tensor->buffer == nullptr ||
+                !ggml_backend_buffer_is_host(tensor->buffer)) {
+                continue;
+            }
+            ranges.emplace_back(tensor->data, ggml_nbytes(tensor));
+        }
+    }
+
+    auto resident = std::make_unique<llama_edge_moe_resident_set>();
+    if (!resident->lock(ranges, process_budget_bytes, error)) {
+        return false;
+    }
+    locked_bytes = resident->size_bytes();
+    pimpl->edge_moe_resident = std::move(resident);
+    return true;
 }
 
 float llama_model::get_rope_freq_base (const llama_cparams & cparams, int il) const {

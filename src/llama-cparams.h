@@ -23,6 +23,15 @@ struct llama_cparams {
 
     int32_t moe_skip_k1 = 0; // compute only the top-k1 routed experts (0 = disabled)
     int32_t moe_skip_k2 = 0; // weight denominator is the top-k2 prob mass (0 = renorm over kept)
+    size_t  moe_arena_bytes = 0;
+    size_t  moe_streaming_budget_bytes = 0;
+    size_t  moe_streaming_reserve_bytes = 0;
+    uint32_t moe_streaming_io_depth = 8;
+    bool     moe_streaming_layered_cache = false;
+    bool     moe_streaming_prefill_full_layer = false;
+    bool     moe_streaming_decode_prefetch = false;
+    uint32_t moe_streaming_hot_slots_per_layer = 0;
+    std::vector<uint32_t> moe_streaming_hot_slots_by_layer;
 
     float rope_freq_base;
     float rope_freq_scale;

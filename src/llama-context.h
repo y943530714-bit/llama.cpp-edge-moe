@@ -16,6 +16,7 @@
 
 struct llama_model;
 class llama_batch_allocr;
+class llama_edge_moe_arena;
 
 class llama_io_read_i;
 class llama_io_write_i;
@@ -262,6 +263,8 @@ private:
 
     llm_graph_cb graph_get_cb() const;
 
+    static bool eval_callback(ggml_tensor * tensor, bool ask, void * user_data);
+
     // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
     // that differs from the layer it belongs to (usually due to missing backend support)
     void resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs);
@@ -287,6 +290,7 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
+    std::unique_ptr<llama_edge_moe_arena> moe_arena;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     buffer_view<float> logits = {nullptr, 0};

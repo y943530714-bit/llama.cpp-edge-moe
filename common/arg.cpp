@@ -4638,6 +4638,97 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.moe_skip_k2 = value;
         }
     ));
+    add_opt(common_arg(
+        {"--moe-arena-mib"}, "N",
+        "fixed CPU expert arena size in MiB (default: 0, disabled; requires --parallel 1 and disables weight repacking)",
+        [](common_params & params, int value) {
+            if (value < 0 || static_cast<size_t>(value) > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
+                throw std::invalid_argument("arena size is outside the supported range");
+            }
+            if (value != 0 && params.moe_streaming_budget_bytes != 0) {
+                throw std::invalid_argument("--moe-arena-mib and --moe-streaming-budget-mib are mutually exclusive");
+            }
+            params.moe_arena_bytes = static_cast<size_t>(value) * 1024 * 1024;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-budget-mib"}, "N",
+        "total process working-set target in MiB for Windows expert streaming (default: 0, disabled)",
+        [](common_params & params, int value) {
+            if (value < 0 || static_cast<size_t>(value) > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
+                throw std::invalid_argument("streaming budget is outside the supported range");
+            }
+            if (value != 0 && params.moe_arena_bytes != 0) {
+                throw std::invalid_argument("--moe-arena-mib and --moe-streaming-budget-mib are mutually exclusive");
+            }
+            params.moe_streaming_budget_bytes = static_cast<size_t>(value) * 1024 * 1024;
+            if (value != 0) {
+                params.fit_params = false;
+            }
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-io-depth"}, "N",
+        "maximum number of unbuffered expert reads in flight (default: 8, range: 1-64)",
+        [](common_params & params, int value) {
+            if (value < 1 || value > 64) {
+                throw std::invalid_argument("streaming I/O depth must be between 1 and 64");
+            }
+            params.moe_streaming_io_depth = static_cast<uint32_t>(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-layered-cache"},
+        {"--no-moe-streaming-layered-cache"},
+        "partition streaming expert slots by layer (default: disabled)",
+        [](common_params & params, bool value) {
+            params.moe_streaming_layered_cache = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-hot-slots-per-layer"}, "N",
+        "hot expert quota for a normal layered-cache layer (default: 0, automatic; range: 0-52)",
+        [](common_params & params, int value) {
+            if (value < 0 || value > 52) {
+                throw std::invalid_argument("streaming hot slots per layer must be between 0 and 52");
+            }
+            params.moe_streaming_hot_slots_per_layer = static_cast<uint32_t>(value);
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-hot-slots-by-layer"}, "N0,N1,...",
+        "exact hot expert quota for every model layer (default: unset; requires layered cache)",
+        [](common_params & params, const std::string & value) {
+            const std::vector<int> parsed = string_split<int>(value, ',');
+            if (parsed.empty()) {
+                throw std::invalid_argument("streaming per-layer hot slot list cannot be empty");
+            }
+            params.moe_streaming_hot_slots_by_layer.clear();
+            params.moe_streaming_hot_slots_by_layer.reserve(parsed.size());
+            for (const int item : parsed) {
+                if (item < 1 || item > 52) {
+                    throw std::invalid_argument("each streaming per-layer hot quota must be between 1 and 52");
+                }
+                params.moe_streaming_hot_slots_by_layer.push_back(static_cast<uint32_t>(item));
+            }
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-prefill-full-layer"},
+        {"--no-moe-streaming-prefill-full-layer"},
+        "pipeline complete expert layers during long prefill (default: disabled; requires layered cache)",
+        [](common_params & params, bool value) {
+            params.moe_streaming_prefill_full_layer = value;
+        }
+    ));
+    add_opt(common_arg(
+        {"--moe-streaming-decode-prefetch"},
+        {"--no-moe-streaming-decode-prefetch"},
+        "prefetch predicted experts for the next decode layer (default: disabled; requires layered cache)",
+        [](common_params & params, bool value) {
+            params.moe_streaming_decode_prefetch = value;
+        }
+    ));
 
     // presets
 

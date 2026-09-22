@@ -2463,6 +2463,15 @@ common_params common_base_params_to_speculative(const common_params & params) {
     const auto & params_spec = params.speculative.draft;
     common_params result = params;
 
+    // Keep the process-wide budget on the target context; its reserve already accounts for the draft.
+    result.moe_arena_bytes = 0;
+    result.moe_streaming_budget_bytes = 0;
+    result.moe_streaming_layered_cache = false;
+    result.moe_streaming_prefill_full_layer = false;
+    result.moe_streaming_decode_prefetch = false;
+    result.moe_streaming_hot_slots_per_layer = 0;
+    result.moe_streaming_hot_slots_by_layer.clear();
+
     result.embedding    = false;
     result.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
 

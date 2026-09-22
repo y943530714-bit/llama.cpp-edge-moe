@@ -1698,6 +1698,35 @@ void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adap
 struct llama_model_params common_model_params_to_llama(common_params & params) {
     auto mparams = llama_model_default_params();
 
+    if (params.moe_arena_bytes != 0 && params.moe_streaming_budget_bytes != 0) {
+        throw std::invalid_argument("--moe-arena-mib and --moe-streaming-budget-mib are mutually exclusive");
+    }
+    if (params.moe_streaming_layered_cache && params.moe_streaming_budget_bytes == 0) {
+        throw std::invalid_argument("--moe-streaming-layered-cache requires --moe-streaming-budget-mib");
+    }
+    if (params.moe_streaming_prefill_full_layer && !params.moe_streaming_layered_cache) {
+        throw std::invalid_argument("--moe-streaming-prefill-full-layer requires --moe-streaming-layered-cache");
+    }
+    if (params.moe_streaming_decode_prefetch && !params.moe_streaming_layered_cache) {
+        throw std::invalid_argument("--moe-streaming-decode-prefetch requires --moe-streaming-layered-cache");
+    }
+    if (params.moe_streaming_hot_slots_per_layer != 0 && !params.moe_streaming_layered_cache) {
+        throw std::invalid_argument("--moe-streaming-hot-slots-per-layer requires --moe-streaming-layered-cache");
+    }
+    if (!params.moe_streaming_hot_slots_by_layer.empty() && !params.moe_streaming_layered_cache) {
+        throw std::invalid_argument("--moe-streaming-hot-slots-by-layer requires --moe-streaming-layered-cache");
+    }
+    if (!params.moe_streaming_hot_slots_by_layer.empty() && params.moe_streaming_hot_slots_per_layer != 0) {
+        throw std::invalid_argument("scalar and per-layer streaming hot slot quotas are mutually exclusive");
+    }
+    if (params.moe_streaming_budget_bytes != 0 &&
+            params.load_mode != LLAMA_LOAD_MODE_AUTO && params.load_mode != LLAMA_LOAD_MODE_MMAP) {
+        throw std::invalid_argument("expert streaming requires mmap model loading");
+    }
+    if (params.moe_streaming_budget_bytes != 0) {
+        params.fit_params = false;
+    }
+
     if (!params.devices.empty()) {
         mparams.devices = params.devices.data();
     }
@@ -1705,12 +1734,12 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.n_gpu_layers    = params.n_gpu_layers;
     mparams.main_gpu        = params.main_gpu;
     mparams.split_mode      = params.split_mode;
-    mparams.load_mode       = params.load_mode;
+    mparams.load_mode       = params.moe_streaming_budget_bytes != 0 ? LLAMA_LOAD_MODE_MMAP : params.load_mode;
     mparams.lazy_mode = params.lazy_mode;
-    mparams.no_prefetch     = params.no_prefetch;
+    mparams.no_prefetch     = params.no_prefetch || params.moe_streaming_budget_bytes != 0;
     mparams.tensor_split    = params.tensor_split;
     mparams.check_tensors   = params.check_tensors;
-    mparams.use_extra_bufts = !params.no_extra_bufts;
+    mparams.use_extra_bufts = params.moe_arena_bytes == 0 && params.moe_streaming_budget_bytes == 0 && !params.no_extra_bufts;
     mparams.no_host         = params.no_host;
 
     if (params.kv_overrides.empty()) {
@@ -1773,6 +1802,29 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.moe_skip_k1 = params.moe_skip_k1;
     cparams.moe_skip_k2 = params.moe_skip_k2;
+    cparams.moe_arena_bytes = params.moe_arena_bytes;
+    cparams.moe_streaming_budget_bytes = params.moe_streaming_budget_bytes;
+    cparams.moe_streaming_io_depth = params.moe_streaming_io_depth;
+    cparams.moe_streaming_layered_cache = params.moe_streaming_layered_cache;
+    cparams.moe_streaming_prefill_full_layer = params.moe_streaming_prefill_full_layer;
+    cparams.moe_streaming_decode_prefetch = params.moe_streaming_decode_prefetch;
+    cparams.moe_streaming_hot_slots_per_layer = params.moe_streaming_hot_slots_per_layer;
+    cparams.moe_streaming_hot_slots_by_layer = params.moe_streaming_hot_slots_by_layer.data();
+    cparams.moe_streaming_hot_slots_by_layer_count = params.moe_streaming_hot_slots_by_layer.size();
+    if (params.moe_streaming_budget_bytes != 0) {
+        constexpr size_t runtime_reserve = 768ull * 1024 * 1024;
+        cparams.moe_streaming_reserve_bytes = runtime_reserve;
+
+        const std::string & draft_path = params.speculative.draft.mparams.path;
+        if (params.speculative.has_dft() && !draft_path.empty()) {
+            std::error_code ec;
+            const uintmax_t draft_size = std::filesystem::file_size(draft_path, ec);
+            if (ec || draft_size > std::numeric_limits<size_t>::max() - cparams.moe_streaming_reserve_bytes) {
+                throw std::runtime_error("cannot reserve the draft model inside the expert streaming budget: " + draft_path);
+            }
+            cparams.moe_streaming_reserve_bytes += static_cast<size_t>(draft_size);
+        }
+    }
 
     return cparams;
 }

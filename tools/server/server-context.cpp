@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <filesystem>
@@ -37,6 +38,11 @@
 #endif
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static bool edge_moe_profile_enabled() {
+    static const bool enabled = std::getenv("LLAMA_EDGE_MOE_PROFILE") != nullptr;
+    return enabled;
+}
 
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
@@ -3026,9 +3032,18 @@ private:
 
         // generate the actual drafts (if any)
         if (!drafting.empty()) {
+            const int64_t t_profile_start = ggml_time_us();
             queue_tasks.yield_to_queue([&]() {
                 common_speculative_draft(spec.get());
             });
+            size_t n_candidates = 0;
+            for (const server_slot * slot : drafting) {
+                n_candidates += slot->spec_draft.size();
+            }
+            if (edge_moe_profile_enabled()) {
+                SRV_INF("EDGEPROF phase=draft_generate us=%lld candidates=%zu tokens=%zu\n",
+                        (long long) (ggml_time_us() - t_profile_start), n_candidates, drafting.size());
+            }
         }
 
         // make checkpoints if needed
@@ -3655,19 +3670,27 @@ private:
         }
 
         bool has_output = false;
+        int32_t n_outputs = 0;
         for (int i = off; i < off + batch_view.n_tokens; ++i) {
             has_output |= batch.tokens[i].output;
+            n_outputs += batch.tokens[i].output ? 1 : 0;
         }
+        const bool is_spec_verify = spec && batch_view.n_tokens > 1 && n_outputs == batch_view.n_tokens;
 
         // yield to the queue, so we can still handle metrics tasks while decoding
         // note: the sync is done here too, so that the wait is also covered by the yield
         int ret = 0;
+        const int64_t t_target_start = ggml_time_us();
         queue_tasks.yield_to_queue([&]() {
             ret = llama_decode(ctx_tgt, batch_view);
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
             }
         });
+        if (is_spec_verify && edge_moe_profile_enabled()) {
+            SRV_INF("EDGEPROF phase=target_verify us=%lld rows=%d tokens=%d\n",
+                    (long long) (ggml_time_us() - t_target_start), batch_view.n_tokens, batch_view.n_tokens);
+        }
 
         if (ret != 0) {
             {
@@ -3727,9 +3750,14 @@ private:
         //       ref: https://github.com/ggml-org/llama.cpp/pull/22728#issuecomment-4400925384
         if (spec) {
             bool ok = true;
+            const int64_t t_draft_ingest_start = ggml_time_us();
             queue_tasks.yield_to_queue([&]() {
                 ok = common_speculative_process(spec.get(), batch_view);
             });
+            if (is_spec_verify && edge_moe_profile_enabled()) {
+                SRV_INF("EDGEPROF phase=draft_ingest_verify us=%lld rows=%d tokens=%d\n",
+                        (long long) (ggml_time_us() - t_draft_ingest_start), batch_view.n_tokens, batch_view.n_tokens);
+            }
 
             if (!ok) {
                 SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3900,6 +3928,7 @@ private:
                 rv.enabled = params_base.speculative.relaxed_verify;
                 rv.eps     = params_base.speculative.relaxed_verify_eps;
                 rv.alpha   = params_base.speculative.relaxed_verify_alpha;
+                const int64_t t_accept_start = ggml_time_us();
                 auto accepted = synth_probs.empty()
                     ? common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft, rv)
                     : server_sample_and_accept_synth(
@@ -3908,6 +3937,10 @@ private:
                 slot.spec_i_batch.clear();
 
                 GGML_ASSERT(accepted.size() >= 1);
+                if (edge_moe_profile_enabled()) {
+                    SRV_INF("EDGEPROF phase=relaxed_accept us=%lld candidates=%zu accepted=%zu\n",
+                            (long long) (ggml_time_us() - t_accept_start), slot.spec_draft.size(), accepted.size() - 1);
+                }
 
                 const uint32_t n_rollback = slot.spec_draft.size() + 1 - accepted.size();
 

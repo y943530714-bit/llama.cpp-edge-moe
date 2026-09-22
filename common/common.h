@@ -507,6 +507,14 @@ struct common_params {
     // edge MoE expert skipping (arXiv:2609.04575)
     int32_t moe_skip_k1 = 0; // compute only the top-k1 routed experts (0 = disabled)
     int32_t moe_skip_k2 = 0; // weight denominator is the top-k2 prob mass (0 = k1)
+    size_t  moe_arena_bytes = 0; // fixed CPU expert arena size (0 = disabled)
+    size_t  moe_streaming_budget_bytes = 0; // total process working-set target (0 = disabled)
+    uint32_t moe_streaming_io_depth = 8; // maximum unbuffered expert reads in flight
+    bool     moe_streaming_layered_cache = false; // partition expert slots by layer
+    bool     moe_streaming_prefill_full_layer = false; // pipeline full expert layers during long prefill
+    bool     moe_streaming_decode_prefetch = false; // prefetch predicted experts for the next decode layer
+    uint32_t moe_streaming_hot_slots_per_layer = 0; // 0 = automatic layered-cache quota
+    std::vector<uint32_t> moe_streaming_hot_slots_by_layer; // optional exact per-layer quotas
 
     ggml_numa_strategy numa = GGML_NUMA_STRATEGY_DISABLED;
 

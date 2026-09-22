@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include "llama-edge-moe-arena.h"
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -1489,6 +1491,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     loras            (params.loras),
     mctx             (params.mctx),
     cross            (params.cross),
+    moe_arena        (params.moe_arena),
     samplers         (params.samplers),
     cb_func          (params.cb),
     res              (params.res),
@@ -2183,8 +2186,40 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(weights, "ffn_moe_weights_scaled", il);
     }
 
+    if (moe_arena != nullptr) {
+        // The arena IDs callback runs after this tensor has been evaluated, so it can use
+        // the final routed probabilities without adding another scheduler synchronization.
+        moe_arena->set_router_weights(static_cast<uint32_t>(il), weights);
+    }
+
     //call early so that topk-moe can be used
     ggml_build_forward_expand(gf, weights);
+
+    ggml_tensor * expert_ids = selected_experts;
+    if (moe_arena != nullptr) {
+        if (!loras->empty() || up_exps_s != nullptr || gate_exps_s != nullptr || down_exps_s != nullptr) {
+            throw std::runtime_error("edge MoE arena does not support LoRA or per-expert scales");
+        }
+
+        ggml_tensor * arena_up      = moe_arena->weight_for(up_exps);
+        ggml_tensor * arena_gate    = moe_arena->weight_for(gate_exps);
+        ggml_tensor * arena_gate_up = moe_arena->weight_for(gate_up_exps);
+        ggml_tensor * arena_down    = moe_arena->weight_for(down_exps);
+
+        const bool have_input = gate_up_exps != nullptr ? arena_gate_up != nullptr :
+            arena_up != nullptr && (gate_exps == nullptr || arena_gate != nullptr);
+        if (!have_input || arena_down == nullptr) {
+            throw std::runtime_error("edge MoE arena is missing a routed expert tensor replacement");
+        }
+
+        expert_ids = ggml_dup(ctx0, selected_experts);
+        cb(expert_ids, "ffn_moe_arena_ids", il);
+
+        up_exps      = arena_up;
+        gate_exps    = arena_gate;
+        gate_up_exps = arena_gate_up;
+        down_exps    = arena_down;
+    }
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
@@ -2200,7 +2235,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (gate_up_exps) {
         // merged gate_up path: one mul_mat_id, then split into gate and up views
-        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, selected_experts, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
+        ggml_tensor * gate_up = build_lora_mm_id(gate_up_exps, cur, expert_ids, up_exps_s); // [n_ff*2, n_expert_used, n_tokens]
         cb(gate_up, "ffn_moe_gate_up", il);
 
         if (up_exps_s) {
@@ -2219,7 +2254,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         cb(up, "ffn_moe_up", il);
     } else {
         // separate gate and up path
-        up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
+        up = build_lora_mm_id(up_exps, cur, expert_ids, up_exps_s); // [n_ff, n_expert_used, n_tokens]
         cb(up, "ffn_moe_up", il);
 
         if (up_exps_s) {
@@ -2232,7 +2267,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         if (gate_exps) {
-            cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
+            cur = build_lora_mm_id(gate_exps, cur, expert_ids, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
         } else {
             cur = up;
@@ -2333,7 +2368,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
+    experts = build_lora_mm_id(down_exps, cur, expert_ids, down_exps_s); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (down_exps_s) {

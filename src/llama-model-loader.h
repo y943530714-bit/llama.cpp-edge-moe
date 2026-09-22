@@ -118,6 +118,7 @@ struct llama_model_loader {
     } lazy;
 
     llama_files files;
+    std::vector<std::string> file_paths;
     llama_ftype ftype;
     llama_fver  fver;
 
@@ -223,6 +224,8 @@ struct llama_model_loader {
     const llama_tensor_weight * get_weight(const char * name) const;
 
     const llama_tensor_weight & require_weight(const char * name) const;
+
+    const std::string & file_path(uint16_t idx) const;
 
     struct ggml_tensor * get_tensor_meta(const char * name) const;
 
